@@ -11,6 +11,7 @@ import argparse
 import gzip
 import hashlib
 import io
+import lzma
 import os
 import struct
 import subprocess
@@ -43,22 +44,17 @@ def patch_keypad(fvmain: bytearray) -> bytearray:
     kpd_base = 0x684e4
     off1 = kpd_base + 0x914
     off2 = kpd_base + 0xae0
+    off3 = kpd_base + 0x34a0  # VA 0x48a0: static EFI_KEY_DATA for Volume Down
 
-    if fvmain[off1:off1+4] == OPCODE_MOV_W9_2 and fvmain[off2:off2+4] == OPCODE_MOV_W0_1:
-        print("[+] Inverting KeypadDeviceDxe volume keys: VolDown->SCAN_DOWN, VolUp->SCAN_UP")
-        fvmain[off1:off1+4] = OPCODE_MOV_W9_1  # VolDown handler emits SCAN_DOWN
-        fvmain[off2:off2+4] = OPCODE_MOV_W0_2  # VolUp handler emits SCAN_UP
-    elif fvmain[off1:off1+4] == OPCODE_MOV_W9_1 and fvmain[off2:off2+4] == OPCODE_MOV_W0_2:
-        print("[*] KeypadDeviceDxe already patched")
-    else:
-        print(f"[!] Warning: unexpected opcodes at KeypadDeviceDxe ({fvmain[off1:off1+4].hex()}, {fvmain[off2:off2+4].hex()})")
-        # Search for exact sequence if base shifted
-        idx1 = fvmain.find(OPCODE_MOV_W9_2)
-        idx2 = fvmain.find(OPCODE_MOV_W0_1)
-        if idx1 != -1 and idx2 != -1:
-            print(f"[+] Found candidate offsets at {hex(idx1)} and {hex(idx2)}, patching...")
-            fvmain[idx1:idx1+4] = OPCODE_MOV_W9_1
-            fvmain[idx2:idx2+4] = OPCODE_MOV_W0_2
+    # Volume Up: emits SCAN_UP (0x0001)
+    fvmain[off1:off1+4] = OPCODE_MOV_W9_1  # mov w9, #1 (SCAN_UP)
+
+    # Volume Down: state tracker sets SCAN_DOWN (0x0002)
+    fvmain[off2:off2+4] = OPCODE_MOV_W0_2  # mov w0, #2 (SCAN_DOWN)
+
+    # Volume Down: static EFI_KEY_DATA pushed on release (at VA 0x48a0): SCAN_DOWN (0x0002)
+    print(f"[+] Patching Volume Down EFI_KEY_DATA at {hex(off3)}: {fvmain[off3:off3+2].hex()} -> 0200 (SCAN_DOWN)")
+    fvmain[off3:off3+2] = bytes.fromhex("0200")
 
     return fvmain
 
@@ -154,6 +150,22 @@ def main():
 
     patched_uefi = repack_uefi(uefi_raw, edk2_lzma_bin)
 
+    # Save patched UEFI kernel FD
+    uefi_out = os.path.join(workspace_root, "out", "uefi_kernel.bin")
+    with open(uefi_out, "wb") as f:
+        f.write(patched_uefi)
+    print(f"[+] Saved patched UEFI kernel: {uefi_out}")
+
+    # Extract and save patched KeypadDeviceDxe.pe
+    kpd_pe_out = os.path.join(workspace_root, "out", "KeypadDeviceDxe.pe")
+    # Decompress FVMAIN to get clean PE
+    stream_off = 0xe000 + 24 + 24
+    decomp_fv = lzma.decompress(patched_uefi[stream_off:stream_off + 0x200000])
+    pe_data = decomp_fv[0x684e4 : 0x684e4 + 14848]
+    with open(kpd_pe_out, "wb") as f:
+        f.write(pe_data)
+    print(f"[+] Saved patched KeypadDeviceDxe.pe: {kpd_pe_out}")
+
     # Gzip UEFI kernel
     buf = io.BytesIO()
     with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=9, mtime=0) as gz:
@@ -192,11 +204,10 @@ def main():
     with open(args.out, "wb") as f:
         f.write(final_boot)
 
-    # Also keep firmware copy updated if directory exists
-    firmware_copy = "/home/suchit-7x/firmware/air/boot_air_all.img"
-    if os.path.exists(os.path.dirname(firmware_copy)):
-        with open(firmware_copy, "wb") as f:
-            f.write(final_boot)
+    for extra_copy in ["/home/suchit-7x/boot_air_all.img", "/home/suchit-7x/firmware/air/boot_air_all.img"]:
+        if os.path.exists(os.path.dirname(extra_copy)):
+            with open(extra_copy, "wb") as f:
+                f.write(final_boot)
 
     print(f"[+] Successfully generated boot image: {args.out} ({len(final_boot)} bytes)")
     print(f"[+] SHA256: {hashlib.sha256(final_boot).hexdigest()}")
