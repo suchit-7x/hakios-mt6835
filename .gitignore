@@ -12,6 +12,7 @@ mtkloader/*.o
 mtkloader/*.bin
 mtkloader/*.gz
 mtkloader/*.img
+tools/edk2_lzma/edk2_lzma_compress
 *.img
 *.ipsw
 *.dmg
