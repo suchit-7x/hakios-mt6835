@@ -26,7 +26,8 @@
 #define RAMOOPS_PMSG         0x4d0e0000ULL
 #define RAMOOPS_PMSG_SIZE    0x10000u
 
-#define TOPRGU_BASE          0x10007000ULL
+/* MT6835 Watchdog / TOPRGU at 0x1c007000 (MT6768 was 0x10007000) */
+#define TOPRGU_BASE          0x1c007000ULL
 #define TOPRGU_MODE          (TOPRGU_BASE + 0x00)
 #define TOPRGU_LENGTH        (TOPRGU_BASE + 0x04)
 #define TOPRGU_RESTART       (TOPRGU_BASE + 0x08)
@@ -35,21 +36,24 @@
 #define TOPRGU_RESTART_KEY   0x1971u
 #define TOPRGU_SWRST_KEY     0x1209u
 
-/* LK's framebuffer (mblock "framebuffer"), the layer LK shows the logo on. */
+/* LK's framebuffer, fallback if not read from OVL0 */
 #define LK_FB_BASE           0x787b0000ULL
-#define LK_FB_SIZE           0x1050000ULL
-#define LK_FB_PITCH          2944u      /* 736 pixels: LK aligns the width to 32 */
+#define LK_FB_SIZE           0x2000000ULL
+#define LK_FB_PITCH          2880u      /* 720 * 4 = 2880 */
 #define PANEL_W              720u
-#define PANEL_H              1640u
+#define PANEL_H              1600u
 
-#define DISP_MUTEX_EN        0x14001020ULL
-#define DISP_MUTEX_RUN       0x14001024ULL
+/* MT6835 Display Mutex at 0x14001000 */
+#define DISP_MUTEX_BASE      0x14001000ULL
+#define DISP_MUTEX_EN        (DISP_MUTEX_BASE + 0x020)
+#define DISP_MUTEX_RUN       (DISP_MUTEX_BASE + 0x024)
 
-#define OVL0_BASE            0x1400b000ULL
+/* MT6835 Display Overlay OVL0 at 0x14002000 (MT6768 was 0x1400b000) */
+#define OVL0_BASE            0x14002000ULL
 #define OVL_SRC_CON          0x02c      /* a bit per layer the hardware composes */
 #define OVL_L0_CON           0x030
 #define OVL_L0_PITCH         0x044
-#define OVL_L0_ADDR          0xf40
+#define OVL_L0_ADDR          0x0f40
 
 static inline uint32_t rd32(uint64_t a) { return *(volatile uint32_t *)a; }
 static inline void wr32(uint64_t a, uint32_t v) { *(volatile uint32_t *)a = v; }

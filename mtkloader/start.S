@@ -20,7 +20,7 @@ _start:
     /* Linux ARM64 Image header (64 bytes); tools/chainboot.py fills image_size, res2, res3 */
     b       primary_entry       /* code0 */
     .word   0                   /* code1 */
-    .quad   0x80000             /* text_offset */
+    .quad   0x00000             /* text_offset: 0 on MT6835 GKI */
     .quad   0x02000000          /* image_size */
     .quad   0x0a                /* flags: little-endian, 4K pages, anywhere */
     .quad   0                   /* res2: length of Android's Image (at CHAIN_OFFSET) */
@@ -43,9 +43,9 @@ primary_entry:
     b       20f
 10: msr     vbar_el1, x2
 20:
-    /* Stack just below the load address (0x40078000), BSS cleared */
+    /* Stack safely inside DRAM within CHAIN_OFFSET region (0x40000) */
     adr     x0, _start
-    sub     x0, x0, #0x8000
+    add     x0, x0, #0x38000
     mov     sp, x0
     ldr     x0, =__bss_start
     ldr     x1, =__bss_end

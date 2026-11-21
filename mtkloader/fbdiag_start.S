@@ -9,7 +9,7 @@
 _start:
     b       entry               /* code0 */
     .word   0                   /* code1 */
-    .quad   0x80000             /* text_offset */
+    .quad   0x00000             /* text_offset: 0 on MT6835 (GKI) */
     .quad   0x02000000          /* image_size */
     .quad   0x0a                /* flags */
     .quad   0
@@ -32,8 +32,9 @@ entry:
     b       2f
 1:  msr     vbar_el1, x2
 2:
+    /* Stack safely inside DRAM within CHAIN_OFFSET region (0x40000) */
     adr     x0, _start
-    sub     x0, x0, #0x8000
+    add     x0, x0, #0x38000
     mov     sp, x0
 
     ldr     x0, =__bss_start
@@ -90,7 +91,7 @@ fault_common:
     mrs     x2, elr_el1
     mrs     x3, far_el1
 2:  adr     x5, _start
-    sub     sp, x5, #0x10000
+    add     sp, x5, #0x3c000
     bl      fbdiag_fault
 3:  wfe
     b       3b
