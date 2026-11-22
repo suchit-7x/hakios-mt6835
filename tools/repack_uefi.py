@@ -133,13 +133,13 @@ def main():
 
     default_uefi = os.path.join(workspace_root, "out", "uefi_kernel.bin")
     default_ramdisk = os.path.join(workspace_root, "out", "air_ramdisk.img")
-    default_boot = os.path.join(workspace_root, "out", "boot_air_all.img")
+    default_boot = os.path.join(workspace_root, "out", "boot-air-shimed.img")
 
     parser = argparse.ArgumentParser(description="Repack UEFI and Android boot image for air (MT6835)")
     parser.add_argument("--uefi", default=default_uefi, help="Path to uncompressed 4 MiB uefi_kernel.bin")
     parser.add_argument("--ramdisk", default=default_ramdisk, help="Path to air_ramdisk.img")
-    parser.add_argument("--template-boot", default=default_boot, help="Template boot image for header")
-    parser.add_argument("--out", default=default_boot, help="Output boot_air_all.img path")
+    parser.add_argument("--template-boot", default=None, help="Template boot image for header")
+    parser.add_argument("--out", default=default_boot, help="Output boot-air-shimed.img path")
     args = parser.parse_args()
 
     edk2_lzma_bin = ensure_edk2_lzma(script_dir)
@@ -180,8 +180,17 @@ def main():
 
     # Read header template
     header_src = args.template_boot
-    if not os.path.exists(header_src):
-        header_src = "/home/suchit-7x/.local/share/Trash/files/boot_air_all.img"
+    if not header_src or not os.path.exists(header_src):
+        for candidate in [
+            os.path.join(workspace_root, "out", "boot-air-shimed.img"),
+            os.path.join(workspace_root, "out", "boot_air_all.img"),
+            "/home/suchit-7x/boot_air_all.img",
+            "/home/suchit-7x/.local/share/Trash/files/boot_air_all.img"
+        ]:
+            if os.path.exists(candidate):
+                header_src = candidate
+                break
+    print(f"[+] Using header template: {header_src}")
     with open(header_src, "rb") as f:
         orig_boot = f.read(4096)
 
@@ -204,7 +213,13 @@ def main():
     with open(args.out, "wb") as f:
         f.write(final_boot)
 
-    for extra_copy in ["/home/suchit-7x/boot_air_all.img", "/home/suchit-7x/firmware/air/boot_air_all.img"]:
+    for extra_copy in [
+        os.path.join(workspace_root, "out", "boot_air_all.img"),
+        "/home/suchit-7x/boot-air-shimed.img",
+        "/home/suchit-7x/boot_air_all.img",
+        "/home/suchit-7x/firmware/air/boot-air-shimed.img",
+        "/home/suchit-7x/firmware/air/boot_air_all.img"
+    ]:
         if os.path.exists(os.path.dirname(extra_copy)):
             with open(extra_copy, "wb") as f:
                 f.write(final_boot)
