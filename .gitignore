@@ -31,3 +31,4 @@ tools/edk2_lzma/edk2_lzma_compress
 *.dylib
 __pycache__/
 .DS_Store
+prebuilt/
