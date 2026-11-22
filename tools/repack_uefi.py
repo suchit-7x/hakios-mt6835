@@ -155,8 +155,19 @@ def main():
 
     edk2_lzma_bin = ensure_edk2_lzma(script_dir)
 
-    print(f"[+] Reading UEFI kernel: {args.uefi}")
-    with open(args.uefi, "rb") as f:
+    uefi_src = args.uefi
+    if not os.path.exists(uefi_src):
+        for candidate in [
+            os.path.join(repo_root, "prebuilt", "uefi_kernel.bin"),
+            "/home/suchit-7x/mkboot/kernel",
+            os.path.join(workspace_root, "out", "uefi_kernel.bin")
+        ]:
+            if os.path.exists(candidate):
+                uefi_src = candidate
+                break
+
+    print(f"[+] Reading UEFI kernel: {uefi_src}")
+    with open(uefi_src, "rb") as f:
         uefi_raw = bytearray(f.read())
 
     pe_candidate = os.path.join(repo_root, "prebuilt", "KeypadDeviceDxe.pe")
@@ -203,6 +214,7 @@ def main():
         for candidate in [
             os.path.join(workspace_root, "out", "boot-air-shimed.img"),
             os.path.join(workspace_root, "out", "boot_air_all.img"),
+            "/home/suchit-7x/mkboot/boot_air_all.img",
             "/home/suchit-7x/boot_air_all.img",
             "/home/suchit-7x/.local/share/Trash/files/boot_air_all.img"
         ]:
