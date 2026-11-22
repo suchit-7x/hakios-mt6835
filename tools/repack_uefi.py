@@ -40,8 +40,16 @@ def ensure_edk2_lzma(script_dir):
         raise FileNotFoundError(f"edk2_lzma_compress not found at {bin_path}")
     return bin_path
 
-def patch_keypad(fvmain: bytearray) -> bytearray:
+def patch_keypad(fvmain: bytearray, pe_file: str = None) -> bytearray:
     kpd_base = 0x684e4
+    if pe_file and os.path.exists(pe_file):
+        with open(pe_file, "rb") as f:
+            pe_data = f.read()
+        if len(pe_data) == 14848:
+            print(f"[+] Injecting clean KeypadDeviceDxe.pe from {pe_file} into FVMAIN at {hex(kpd_base)}")
+            fvmain[kpd_base : kpd_base + 14848] = pe_data
+            return fvmain
+
     off1 = kpd_base + 0x914
     off2 = kpd_base + 0xae0
     off3 = kpd_base + 0x34a0  # VA 0x48a0: static EFI_KEY_DATA for Volume Down
@@ -53,12 +61,15 @@ def patch_keypad(fvmain: bytearray) -> bytearray:
     fvmain[off2:off2+4] = OPCODE_MOV_W0_2  # mov w0, #2 (SCAN_DOWN)
 
     # Volume Down: static EFI_KEY_DATA pushed on release (at VA 0x48a0): SCAN_DOWN (0x0002)
-    print(f"[+] Patching Volume Down EFI_KEY_DATA at {hex(off3)}: {fvmain[off3:off3+2].hex()} -> 0200 (SCAN_DOWN)")
-    fvmain[off3:off3+2] = bytes.fromhex("0200")
+    if fvmain[off3:off3+2] != bytes.fromhex("0200"):
+        print(f"[+] Patching Volume Down EFI_KEY_DATA at {hex(off3)}: {fvmain[off3:off3+2].hex()} -> 0200 (SCAN_DOWN)")
+        fvmain[off3:off3+2] = bytes.fromhex("0200")
+    else:
+        print(f"[*] Volume Down EFI_KEY_DATA at {hex(off3)} already set to SCAN_DOWN (0200)")
 
     return fvmain
 
-def repack_uefi(uefi_raw: bytearray, edk2_lzma_bin: str) -> bytearray:
+def repack_uefi(uefi_raw: bytearray, edk2_lzma_bin: str, pe_file: str = None) -> bytearray:
     # 1. Locate FVMAIN FFS file (at 0xe000)
     ffs_off = uefi_raw.find(GUID_FVMAIN)
     if ffs_off == -1:
@@ -76,8 +87,8 @@ def repack_uefi(uefi_raw: bytearray, edk2_lzma_bin: str) -> bytearray:
     fvmain = bytearray(lzma.decompress(uefi_raw[stream_off:stream_off + 0x200000]))
     print(f"[+] Decompressed FVMAIN size: {len(fvmain)} bytes ({hex(len(fvmain))})")
 
-    # 2. Patch Keypad opcodes
-    fvmain = patch_keypad(fvmain)
+    # 2. Patch or inject Keypad driver
+    fvmain = patch_keypad(fvmain, pe_file)
 
     # 3. Compress with edk2_lzma_compress
     with tempfile.NamedTemporaryFile(delete=False) as f_in, tempfile.NamedTemporaryFile(delete=False) as f_out:
@@ -148,7 +159,15 @@ def main():
     with open(args.uefi, "rb") as f:
         uefi_raw = bytearray(f.read())
 
-    patched_uefi = repack_uefi(uefi_raw, edk2_lzma_bin)
+    pe_candidate = os.path.join(repo_root, "prebuilt", "KeypadDeviceDxe.pe")
+    if not os.path.exists(pe_candidate):
+        pe_candidate = os.path.join(workspace_root, "out", "KeypadDeviceDxe.pe")
+
+    patched_uefi = repack_uefi(
+        uefi_raw,
+        edk2_lzma_bin,
+        pe_file=pe_candidate if os.path.exists(pe_candidate) else None
+    )
 
     # Save patched UEFI kernel FD
     uefi_out = os.path.join(workspace_root, "out", "uefi_kernel.bin")
