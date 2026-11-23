@@ -402,26 +402,259 @@ def main():
     data[0x43d0a4 : 0x43d0a8] = bytes.fromhex('1f2003d5')
     print("[+] Injected LIME probe after PE_create_console at 0x4477f0 (hooked 0x43d0a0)")
 
-    # 5k. Probe 10: Panic hook (RED bar at 0xff31f000) at file offset 0x447830
-    body_panic = assemble('''
-        mov x11, #0xf000
-        movk x11, #0xff31, lsl #16
-        mov w10, #0x0000
-        movk w10, #0xffff, lsl #16
-        mov x9, #0x5c00
-    1:  stp w10, w10, [x11], #8
-        subs x9, x9, #8
+    # 5k. Probe 10: Early Panic on-screen text logger at file offset 0x447830
+    panic_logger_code = '''
+        // When _panic is called at 0xfffffff007a78bd8:
+        // x0 = format string or filename
+        // x30 = return address to caller (or __assert at 0xfffffff007a78c2c)
+        // sp is stack pointer before sub sp, sp, #32
+
+        mov x19, x0        // x19 = format / file
+        mov x20, x30       // x20 = lr
+        mov x21, sp        // x21 = sp
+
+        // Map FB base: 0xff1ef000 (boot_args->Video.v_baseAddr)
+        mov x22, #0xf000
+        movk x22, #0xff1e, lsl #16  // x22 = FB base (top of screen)
+        mov x23, #2944              // rowBytes
+
+        // 1. Draw RED header bar (40 lines)
+        mov x0, x22
+        mov w1, #0x0000
+        movk w1, #0xffff, lsl #16   // ARGB: Red
+        mov x2, #0xe000             // 40 lines * 720 * 4 = 115200 bytes
+    1:  stp w1, w1, [x0], #8
+        subs x2, x2, #8
         b.hi 1b
-        sub sp, sp, #32
-        stp x29, x30, [sp, #16]
-    ''')
-    b_back_panic = calc_b(0x447830 + len(body_panic), 0xa74be0)
-    probe_panic = body_panic + b_back_panic
-    assert len(probe_panic) <= 48
+
+        // 2. Clear background black for 800 lines below header (lines 40 to 840)
+        mov w1, #40
+        madd x0, x1, x23, x22
+        mov w2, #0x0000
+        movk w2, #0x24, lsl #16     // 800 lines * 2944 = 2355200 bytes (~0x240000)
+    2:  stp xzr, xzr, [x0], #8
+        subs x2, x2, #8
+        b.hi 2b
+
+        // iso_font address: 0xfffffff007a9be10
+        mov x24, #0xbe10
+        movk x24, #0x07a9, lsl #16
+        movk x24, #0xfff0, lsl #32
+        movk x24, #0xffff, lsl #48  // x24 = iso_font
+
+        // Check if called from __assert (0xfffffff007a78c2c)
+        mov x8, #0x8c2c
+        movk x8, #0x07a7, lsl #16
+        movk x8, #0xfff0, lsl #32
+        movk x8, #0xffff, lsl #48
+        cmp x20, x8
+        b.eq is_assert
+
+    is_panic:
+        // Draw "*** KERNEL PANIC ***" at line 60, col 20
+        mov w1, #60
+        madd x0, x1, x23, x22
+        add x0, x0, #80
+        adr x1, str_panic_title
+        bl draw_string
+
+        // Draw "CALLER: 0x" + hex(x20) at line 90
+        mov w1, #90
+        madd x0, x1, x23, x22
+        add x0, x0, #80
+        adr x1, str_caller
+        bl draw_string
+        mov x1, x20
+        bl draw_hex
+
+        // Draw format string at line 120
+        mov w1, #120
+        madd x0, x1, x23, x22
+        add x0, x0, #80
+        adr x1, str_msg
+        bl draw_string
+        mov x1, x19
+        bl draw_string
+        b hang
+
+    is_assert:
+        // From __assert:
+        // [x21, #0x10] = assertion expr string
+        // [x21, #0]    = file string
+        // [x21, #8]    = line number
+        // [x21, #0x28] = caller LR
+        ldr x25, [x21, #0x10] // expr
+        ldr x26, [x21, #0]    // file
+        ldr x27, [x21, #8]    // line
+        ldr x28, [x21, #0x28] // caller
+
+        // Line 60: "*** ASSERTION FAILED ***"
+        mov w1, #60
+        madd x0, x1, x23, x22
+        add x0, x0, #80
+        adr x1, str_assert_title
+        bl draw_string
+
+        // Line 90: "CALLER: 0x" + hex(caller)
+        mov w1, #90
+        madd x0, x1, x23, x22
+        add x0, x0, #80
+        adr x1, str_caller
+        bl draw_string
+        mov x1, x28
+        bl draw_hex
+
+        // Line 120: "FILE: " + file
+        mov w1, #120
+        madd x0, x1, x23, x22
+        add x0, x0, #80
+        adr x1, str_file
+        bl draw_string
+        mov x1, x26
+        bl draw_string
+
+        // Line 150: "LINE: 0x" + hex(line)
+        mov w1, #150
+        madd x0, x1, x23, x22
+        add x0, x0, #80
+        adr x1, str_line
+        bl draw_string
+        mov x1, x27
+        bl draw_hex
+
+        // Line 180: "EXPR: " + expr
+        mov w1, #180
+        madd x0, x1, x23, x22
+        add x0, x0, #80
+        adr x1, str_expr
+        bl draw_string
+        mov x1, x25
+        bl draw_string
+
+    hang:
+        wfe
+        b hang
+
+    draw_string:
+        stp x29, x30, [sp, #-32]!
+        stp x19, x20, [sp, #16]
+        mov x19, x0
+        mov x20, x0
+
+        cbnz x1, 1f
+        adr x1, str_null
+    1:
+    str_next:
+        ldrb w2, [x1], #1
+        cbz w2, str_done
+        cmp w2, #'\\n'
+        b.eq str_newline
+        cmp w2, #32
+        b.lo str_space
+        cmp w2, #126
+        b.hi str_space
+        b str_draw_c
+
+    str_newline:
+        mov w4, #20
+        madd x20, x4, x23, x20
+        mov x19, x20
+        b str_next
+
+    str_space:
+        mov w2, #32
+    str_draw_c:
+        add x3, x24, x2, lsl #4
+        mov w4, #16
+        mov x5, x19
+    char_row:
+        ldrb w6, [x3], #1
+        mov w7, #8
+    char_pix:
+        tst w6, #0x80
+        mov w8, #0
+        movk w8, #0xffff, lsl #16
+        b.ne 1f
+        mov w8, #0
+    1:  str w8, [x5], #4
+        lsl w6, w6, #1
+        subs w7, w7, #1
+        b.ne char_pix
+        sub x5, x5, #32
+        add x5, x5, x23
+        subs w4, w4, #1
+        b.ne char_row
+
+        add x19, x19, #32
+        sub x6, x19, x20
+        cmp x6, #2720
+        b.lo str_next
+        mov w4, #20
+        madd x20, x4, x23, x20
+        mov x19, x20
+        b str_next
+
+    str_done:
+        mov x0, x19
+        ldp x19, x20, [sp, #16]
+        ldp x29, x30, [sp], #32
+        ret
+
+    draw_hex:
+        stp x29, x30, [sp, #-32]!
+        stp x19, x20, [sp, #16]
+        mov x19, x1
+        mov w20, #60
+    hex_loop:
+        lsr x1, x19, x20
+        and w2, w1, #0xf
+        cmp w2, #10
+        b.ge 1f
+        add w2, w2, #'0'
+        b 2f
+    1:  add w2, w2, #('A' - 10)
+    2:  add x3, x24, x2, lsl #4
+        mov w4, #16
+        mov x5, x0
+    h_row:
+        ldrb w6, [x3], #1
+        mov w7, #8
+    h_pix:
+        tst w6, #0x80
+        mov w8, #0
+        movk w8, #0xffff, lsl #16
+        b.ne 3f
+        mov w8, #0
+    3:  str w8, [x5], #4
+        lsl w6, w6, #1
+        subs w7, w7, #1
+        b.ne h_pix
+        sub x5, x5, #32
+        add x5, x5, x23
+        subs w4, w4, #1
+        b.ne h_row
+        add x0, x0, #32
+        subs w20, w20, #4
+        b.ge hex_loop
+        ldp x19, x20, [sp, #16]
+        ldp x29, x30, [sp], #32
+        ret
+
+    str_panic_title:  .asciz "*** KERNEL PANIC ***"
+    str_assert_title: .asciz "*** ASSERTION FAILED ***"
+    str_caller:       .asciz "CALLER: 0x"
+    str_msg:          .asciz "MSG: "
+    str_file:         .asciz "FILE: "
+    str_line:         .asciz "LINE: 0x"
+    str_expr:         .asciz "EXPR: "
+    str_null:         .asciz "(null)"
+    '''
+    probe_panic = assemble(panic_logger_code)
+    assert len(probe_panic) <= 1024, f"probe_panic too large: {len(probe_panic)}"
     data[0x447830 : 0x447830 + len(probe_panic)] = probe_panic
     data[0xa74bd8 : 0xa74bdc] = calc_b(0xa74bd8, 0x447830)
     data[0xa74bdc : 0xa74be0] = bytes.fromhex('1f2003d5')
-    print("[+] Injected RED probe into _panic at 0x447830 (hooked 0xa74bd8)")
+    print(f"[+] Injected early Panic text logger at 0x447830 ({len(probe_panic)} bytes, hooked 0xa74bd8)")
 
     # 6. Master CPU & Topology fixes:
     # 6a. Statically initialize topology_info at file offset 0x1b25a0 (KVA 0xfffffff0071b65a0)
