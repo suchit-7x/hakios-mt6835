@@ -890,6 +890,57 @@ def main():
         ldp x29, x30, [sp], #48
         sub x21, x29, #0x70
         ret
+
+    .global draw_init_result
+    draw_init_result:
+        /* preserve registers */
+        stp x29, x30, [sp, #-32]!
+        stp x1, x2, [sp, #16]
+
+        /* Check if w0 == 0 (success) */
+        cbnz w0, 1f
+
+        /* SUCCESS: Paint Bright Green (0xff00ff00) across Row 1520 (0xff643800) */
+        mov x1, #0x3800
+        movk x1, #0xff64, lsl #16
+        mov w2, #0xff00
+        movk w2, #0x00ff, lsl #16
+        b 2f
+
+    1:  /* FAILURE: Paint Bright Red (0xffff0000) across Row 1520 (0xff643800) */
+        mov x1, #0x3800
+        movk x1, #0xff64, lsl #16
+        mov w2, #0x0000
+        movk w2, #0xffff, lsl #16
+
+    2:  /* Draw 16 rows of the bar (2944 bytes = 736 words per row) */
+        mov w12, #16
+    bar_rows_loop_res:
+        mov x17, x1
+        mov x9, #2944
+    3:  str w2, [x17], #4
+        subs x9, x9, #4
+        b.hi 3b
+        add x1, x1, #2944
+        subs w12, w12, #1
+        b.ne bar_rows_loop_res
+
+        dsb sy
+        isb
+
+        ldp x1, x2, [sp, #16]
+        ldp x29, x30, [sp], #32
+
+        /* If w0 == 0, jump to 0xfffffff0077b3498 (success exit) */
+        cbz w0, 4f
+        ret
+
+    4:
+        mov x16, #0x3498
+        movk x16, #0x077b, lsl #16
+        movk x16, #0xffff, lsl #32
+        movk x16, #0xffff, lsl #48
+        br x16
     '''
     probe_bytes = assemble(probe_code)
     assert len(probe_bytes) <= 1024
@@ -942,6 +993,45 @@ def main():
     assert data[0xfa234 : 0xfa234 + len(launchd_str)] == launchd_str, f"Unexpected data at 0xfa234: {data[0xfa234:0xfa234+len(launchd_str)]}"
     data[0xfa234 : 0xfa234 + len(init_str)] = init_str
     print("[+] Patched /sbin/launchd -> /sbin/init at file offset 0xfa234")
+
+    # 17. Disable code signing enforcement & AMFI restrictions across kernel
+    # a) Patch _code_signing_configuration at 0xfffffff0077f5f90 (file offset 0x7f1f90)
+    # Force config = 0xff (ALLOW_ANY_SIGNATURE | ENFORCEMENT_DISABLED | GET_OUT_OF_MY_WAY | UNRESTRICTED_DEBUGGING)
+    cs_patch = bytes.fromhex("400000b41f0000b9610000b4e81f8052280000b9c0035fd6")
+    assert len(cs_patch) == 24
+    data[0x7f1f90 : 0x7f1f90 + 24] = cs_patch
+    print("[+] Patched _code_signing_configuration at 0x7f1f90 to force config=0xff")
+
+    # b) Patch _cs_process_enforcement at 0xfffffff0077948fc (file offset 0x7908fc) -> return 0
+    ret_zero = bytes.fromhex("00008052c0035fd6") # mov w0, #0; ret
+    data[0x7908fc : 0x7908fc + 8] = ret_zero
+    print("[+] Patched _cs_process_enforcement at 0x7908fc -> return 0")
+
+    # c) Patch _cs_system_enforcement at 0xfffffff007794950 (file offset 0x790950) -> return 0
+    data[0x790950 : 0x790950 + 8] = ret_zero
+    print("[+] Patched _cs_system_enforcement at 0x790950 -> return 0")
+
+    # d) Patch _cs_process_global_enforcement at 0xfffffff00779493c (file offset 0x79093c) -> return 0
+    data[0x79093c : 0x79093c + 8] = ret_zero
+    print("[+] Patched _cs_process_global_enforcement at 0x79093c -> return 0")
+
+    # e) Statically zero out cs_system_enforcement_enable and cs_process_enforcement_enable
+    # at file offsets 0x1ce260 and 0x1ce264
+    data[0x1ce260 : 0x1ce268] = bytes.fromhex("0000000000000000")
+    print("[+] Zeroed cs_system_enforcement_enable and cs_process_enforcement_enable at 0x1ce260")
+
+    # 18. Hook load_init_program result at 0xfffffff0077b3434 (file offset 0x7af434) -> draw_init_result
+    init_res_off = None
+    for line in nm_out.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[2] == 'draw_init_result':
+            init_res_off = int(parts[0], 16)
+            break
+    assert init_res_off is not None, "Failed to find draw_init_result symbol"
+    init_res_kva = 0xfffffff007a881d0 + init_res_off
+    b_init_res = calc_bl(0xfffffff0077b3434, init_res_kva)
+    data[0x7af434 : 0x7af438] = b_init_res
+    print(f"[+] Hooked load_init_program result at 0x7af434 -> {hex(init_res_kva)} (offset +{hex(init_res_off)})")
 
     with open(kernel_out, 'wb') as f:
         f.write(data)

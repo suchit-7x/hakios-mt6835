@@ -96,7 +96,7 @@ title = "iOS 16.5"
 type = "xnu"
 path = "Payloads/KERNEL"
 initrd = "Payloads/root.apfs"
-args = "-v debug=0x14e keepsyms=1 serial=0 -enable_kprintf_spam wdt=-1 rd=md0 root_apfs=ufs_xnusys"
+args = "-v debug=0x14e keepsyms=1 serial=0 -enable_kprintf_spam wdt=-1 rd=md0 root_apfs=ufs_xnusys cs_enforcement_disable=1 amfi_get_out_of_my_way=1 amfi=0xff"
 [[entry]]
 id = "reset"
 title = "Restart"
