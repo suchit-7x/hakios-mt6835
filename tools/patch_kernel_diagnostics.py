@@ -451,7 +451,7 @@ def main():
         b.eq is_assert
 
     is_panic:
-        // Draw "*** KERNEL PANIC ***" at line 60, col 20
+        // Draw "*** KERNEL PANIC ***" at line 60, col 20 (visually from left)
         mov w1, #60
         madd x0, x1, x23, x22
         add x0, x0, #80
@@ -656,6 +656,70 @@ def main():
     data[0xa74bdc : 0xa74be0] = bytes.fromhex('1f2003d5')
     print(f"[+] Injected early Panic text logger at 0x447830 ({len(probe_panic)} bytes, hooked 0xa74bd8)")
 
+    # 5l. Preemption helpers for early boot (TPIDR_EL1 == NULL):
+    # Place helpers at file offset 0x447c00 (KVA 0xfffffff00744bc00)
+    preempt_helpers = assemble('''
+    safe_disable_preemption:
+        mrs x8, tpidr_el1
+        cbz x8, 1f
+        ldr w9, [x8, #0x1d0]
+        add w9, w9, #1
+        str w9, [x8, #0x1d0]
+    1:  ret
+
+    safe_enable_preemption:
+        mrs x8, tpidr_el1
+        cbz x8, 1f
+        stp x29, x30, [sp, #-0x10]!
+        mov x29, sp
+        ldr w9, [x8, #0x1d0]
+        cbz w9, 2f
+        subs w9, w9, #1
+        str w9, [x8, #0x1d0]
+        b.ne 3f
+        ldr x8, [x8, #0x1c8]
+        ldrb w8, [x8, #0x4c]
+        tbnz w8, #2, 4f
+    3:  ldp x29, x30, [sp], #0x10
+    1:  ret
+    2:  ldp x29, x30, [sp], #0x10
+        ret
+    4:  ldp x29, x30, [sp], #0x10
+        mov x8, #0x61c4
+        movk x8, #0x0744, lsl #16
+        movk x8, #0xfff0, lsl #32
+        movk x8, #0xffff, lsl #48
+        br x8
+
+    safe_get_preemption_level:
+        mrs x8, tpidr_el1
+        mov w0, #0
+        cbz x8, 1f
+        ldr w0, [x8, #0x1d0]
+    1:  ret
+
+    safe_get_preemption_level_for_thread:
+        mov w9, #0
+        cbz x0, 1f
+        ldr w9, [x0, #0x1d0]
+    1:  mov w0, w9
+        ret
+    ''')
+    assert len(preempt_helpers) <= 512, f"preempt_helpers too large: {len(preempt_helpers)}"
+    data[0x447c00 : 0x447c00 + len(preempt_helpers)] = preempt_helpers
+
+    # Hook _disable_preemption at 0xfffffff007445c2c (file offset 0x441c2c)
+    data[0x441c2c : 0x441c30] = calc_b(0xfffffff007445c2c, 0xfffffff00744bc00)
+    # Hook _disable_preemption_without_measurements at 0xfffffff007445c40 (file offset 0x441c40)
+    data[0x441c40 : 0x441c44] = calc_b(0xfffffff007445c40, 0xfffffff00744bc00)
+    # Hook _enable_preemption at 0xfffffff007445c54 (file offset 0x441c54)
+    data[0x441c54 : 0x441c58] = calc_b(0xfffffff007445c54, 0xfffffff00744bc18)
+    # Hook _get_preemption_level at 0xfffffff007445c9c (file offset 0x441c9c)
+    data[0x441c9c : 0x441ca0] = calc_b(0xfffffff007445c9c, 0xfffffff00744bc70)
+    # Hook _get_preemption_level_for_thread at 0xfffffff007445c94 (file offset 0x441c94)
+    data[0x441c94 : 0x441c98] = calc_b(0xfffffff007445c94, 0xfffffff00744bc84)
+    print(f"[+] Injected safe preemption helpers at 0x447c00 ({len(preempt_helpers)} bytes, hooked 0x441c2c, 0x441c40, 0x441c54, 0x441c9c, 0x441c94)")
+
     # 6. Master CPU & Topology fixes:
     # 6a. Statically initialize topology_info at file offset 0x1b25a0 (KVA 0xfffffff0071b65a0)
     data[0x1b25a4 : 0x1b25a8] = (8).to_bytes(4, 'little')
@@ -743,11 +807,19 @@ def main():
     data[0x4172d4 : 0x4172d8] = bytes.fromhex('1f2003d5')
     print("[+] NOPed out panic branch in early_random_init at 0x4172d4")
 
-    # 8. arm_vm_prot_init bypass for missing TrustCache / AuxKC in chosen/memory-map:
+    # 8. VM initialization fixes:
+    # 8a. arm_vm_prot_init bypass for missing TrustCache / AuxKC in chosen/memory-map:
     # At 0xfffffff007441e30 (file offset 0x43de30):
     b_skip_tc = calc_b(0xfffffff007441e30, 0xfffffff007441fdc)
     data[0x43de30 : 0x43de34] = b_skip_tc
     print("[+] Patched arm_vm_prot_init at 0x43de30 to skip TrustCache/AuxKC and bypass assert line 1287")
+
+    # 8b. pmap_bootstrap bypass for missing DT /defaults node (assert err == kSuccess at line 1989):
+    # At 0xfffffff007423f2c (file offset 0x41ff2c):
+    # Jump directly to 0xfffffff007423fa0 (mov w8, #0x800; str w8, [x24, #0x424])
+    b_skip_pmap_defaults = calc_b(0xfffffff007423f2c, 0xfffffff007423fa0)
+    data[0x41ff2c : 0x41ff30] = b_skip_pmap_defaults
+    print("[+] Patched pmap_bootstrap at 0x41ff2c to default max_asids=2048 and bypass /defaults assert")
 
     # 9. Video Console Text Mode & disableConsoleOutput fixes:
     # 9a. Force PE_create_console to call PE_initialize_console(&PE_state.video, kPETextMode):
