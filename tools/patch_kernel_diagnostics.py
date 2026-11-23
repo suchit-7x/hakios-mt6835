@@ -832,6 +832,52 @@ def main():
     data[0x4332d8 : 0x4332dc] = bytes.fromhex('c0035fd6') # ret
     print("[+] Patched pmap_data_bootstrap helpers at 0x432d68, 0x432ec4, 0x4332d8 to bypass /defaults asserts")
 
+    # 8d. device_tree.c bounds check panics bypass:
+    # Convert fatal panics on out-of-bounds / malformed DT pointers into clean error returns (-1 / NULL).
+    # 1. DTFindEntry at 0xfffffff007a4e5d4 (file offset 0xa4a5d4): return -1
+    off_dt_find = 0xfffffff007a4e5d4 - 0xfffffff007004000
+    p_dt_find = assemble('mov w0, #-1') + calc_b(0xfffffff007a4e5d8, 0xfffffff007a4e578)
+    data[off_dt_find : off_dt_find + len(p_dt_find)] = p_dt_find
+
+    # 2. DTFindEntry property overflow at 0xfffffff007a4e5b0 (file offset 0xa4a5b0): return -1
+    off_dt_find_ovf = 0xfffffff007a4e5b0 - 0xfffffff007004000
+    p_dt_find_ovf = assemble('mov w0, #-1') + calc_b(0xfffffff007a4e5b4, 0xfffffff007a4e578)
+    data[off_dt_find_ovf : off_dt_find_ovf + len(p_dt_find_ovf)] = p_dt_find_ovf
+
+    # 3. DTLookupEntry at 0xfffffff007a4e838 (file offset 0xa4a838): return -1
+    off_dt_lookup = 0xfffffff007a4e838 - 0xfffffff007004000
+    p_dt_lookup = assemble('mov w0, #-1') + calc_b(0xfffffff007a4e83c, 0xfffffff007a4e7b8)
+    data[off_dt_lookup : off_dt_lookup + len(p_dt_lookup)] = p_dt_lookup
+
+    # 4. DTGetProperty at 0xfffffff007a4eb84 & 0xfffffff007a4eba8 (file offsets 0xa4ab84, 0xa4aba8): return -1
+    off_dt_getprop1 = 0xfffffff007a4eb84 - 0xfffffff007004000
+    off_dt_getprop2 = 0xfffffff007a4eba8 - 0xfffffff007004000
+    data[off_dt_getprop1 : off_dt_getprop1 + 4] = calc_b(0xfffffff007a4eb84, 0xfffffff007a4eb00)
+    data[off_dt_getprop2 : off_dt_getprop2 + 4] = calc_b(0xfffffff007a4eba8, 0xfffffff007a4eb00)
+
+    # 5. DTIterateProperties at 0xfffffff007a4ed00 & 0xfffffff007a4ed24 (file offsets 0xa4ad00, 0xa4ad24): return 0
+    off_dt_iter1 = 0xfffffff007a4ed00 - 0xfffffff007004000
+    off_dt_iter2 = 0xfffffff007a4ed24 - 0xfffffff007004000
+    data[off_dt_iter1 : off_dt_iter1 + 4] = calc_b(0xfffffff007a4ed00, 0xfffffff007a4ec44)
+    data[off_dt_iter2 : off_dt_iter2 + 4] = calc_b(0xfffffff007a4ed24, 0xfffffff007a4ec44)
+
+    # 6. DTGetFirstChild at 0xfffffff007a4ede8 & 0xfffffff007a4ee0c (file offsets 0xa4ade8, 0xa4ae0c): return NULL
+    off_dt_child1 = 0xfffffff007a4ede8 - 0xfffffff007004000
+    off_dt_child2 = 0xfffffff007a4ee0c - 0xfffffff007004000
+    data[off_dt_child1 : off_dt_child1 + 4] = calc_b(0xfffffff007a4ede8, 0xfffffff007a4edc0)
+    data[off_dt_child2 : off_dt_child2 + 4] = calc_b(0xfffffff007a4ee0c, 0xfffffff007a4edc0)
+
+    # 7. DTGetNextChild at 0xfffffff007a4eeb8 (file offset 0xa4aeb8): return NULL
+    off_dt_next = 0xfffffff007a4eeb8 - 0xfffffff007004000
+    p_dt_next = assemble('mov x0, #0') + calc_b(0xfffffff007a4eebc, 0xfffffff007a4ee90)
+    data[off_dt_next : off_dt_next + len(p_dt_next)] = p_dt_next
+
+    # 8. Node validator at 0xfffffff007a4e9e4 (file offset 0xa4a9e4): return 0
+    off_dt_valid = 0xfffffff007a4e9e4 - 0xfffffff007004000
+    p_dt_valid = assemble('mov x0, #0') + calc_b(0xfffffff007a4e9e8, 0xfffffff007a4e9bc)
+    data[off_dt_valid : off_dt_valid + len(p_dt_valid)] = p_dt_valid
+    print("[+] Patched device_tree.c bounds panics (DTFindEntry, DTLookupEntry, DTGetProperty, DTIterateProperties, DTGetFirstChild, DTGetNextChild) to safe error returns")
+
     # 9. Video Console Text Mode & disableConsoleOutput fixes:
     # 9a. Force PE_create_console to call PE_initialize_console(&PE_state.video, kPETextMode):
     patch_pe_console = assemble('''
