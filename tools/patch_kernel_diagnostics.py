@@ -177,7 +177,7 @@ def main():
     print("[+] Injected CYAN probe + ADT injection at 0x4474d0 and hooked start.s exit at 0x44a4a8")
 
     # Injected arm_init diagnostic probes in the NOP region:
-    # 5a. Probe 2: arm_init entry (RED bar at 0xff26f000) at 0xfffffff007447540 (file offset 0x447540)
+    # 5a. Probe 2: arm_init entry (RED bar at 0xff26f000) at file offset 0x447540
     probe2_body = assemble('''
         mov x11, #0xf000
         movk x11, #0xff26, lsl #16
@@ -189,14 +189,14 @@ def main():
         b.hi 1b
         mov x19, x0
     ''')
-    b_back_probe2 = calc_b(0xfffffff007447540 + len(probe2_body), 0xfffffff007440818)
+    b_back_probe2 = calc_b(0x447540 + len(probe2_body), 0x43c818)
     probe2 = probe2_body + b_back_probe2
     assert len(probe2) == 40
     data[0x447540 : 0x447540 + len(probe2)] = probe2
-    data[0x43c814 : 0x43c818] = calc_b(0xfffffff007440814, 0xfffffff007447540)
+    data[0x43c814 : 0x43c818] = calc_b(0x43c814, 0x447540)
     print("[+] Injected RED probe at arm_init entry (0x447540, hooked 0x43c814)")
 
-    # 5b. Probe 3: PE_init_platform (MAGENTA before at 0xff27f000, LIME after at 0xff28f000) at 0xfffffff007447580 (file offset 0x447580)
+    # 5b. Probe 3: PE_init_platform (MAGENTA before at 0xff27f000, LIME after at 0xff28f000) at file offset 0x447580
     probe3_part1 = assemble('''
         stp x29, x30, [sp, #-16]!
         mov x11, #0xf000
@@ -208,7 +208,7 @@ def main():
         subs x9, x9, #8
         b.hi 1b
     ''')
-    bl_pe_init = calc_bl(0xfffffff007447580 + len(probe3_part1), 0xfffffff007a51df4)
+    bl_pe_init = calc_bl(0x447580 + len(probe3_part1), 0xa4ddf4)
     probe3_part2 = assemble('''
         mov x11, #0xf000
         movk x11, #0xff28, lsl #16
@@ -224,10 +224,10 @@ def main():
     probe3 = probe3_part1 + bl_pe_init + probe3_part2
     assert len(probe3) == 80
     data[0x447580 : 0x447580 + len(probe3)] = probe3
-    data[0x43ccd4 : 0x43ccd8] = calc_bl(0xfffffff007440cd4, 0xfffffff007447580)
+    data[0x43ccd4 : 0x43ccd8] = calc_bl(0x43ccd4, 0x447580)
     print("[+] Injected MAGENTA/LIME probe around PE_init_platform (0x447580, hooked 0x43ccd4)")
 
-    # 5c. Probe 4: After /chosen lookup (BLUE bar at 0xff29f000) at 0xfffffff007447600 (file offset 0x447600)
+    # 5c. Probe 4: After /chosen lookup (BLUE bar at 0xff29f000) at file offset 0x447600
     probe4_body = assemble('''
         mov x11, #0xf000
         movk x11, #0xff29, lsl #16
@@ -239,14 +239,14 @@ def main():
         b.hi 1b
         ldr x0, [sp, #56]
     ''')
-    b_back_probe4 = calc_b(0xfffffff007447600 + len(probe4_body), 0xfffffff007440d38)
+    b_back_probe4 = calc_b(0x447600 + len(probe4_body), 0x43cd38)
     probe4 = probe4_body + b_back_probe4
     assert len(probe4) == 40
     data[0x447600 : 0x447600 + len(probe4)] = probe4
-    data[0x43cd34 : 0x43cd38] = calc_b(0xfffffff007440d34, 0xfffffff007447600)
+    data[0x43cd34 : 0x43cd38] = calc_b(0x43cd34, 0x447600)
     print("[+] Injected BLUE probe after /chosen lookup (0x447600, hooked 0x43cd34)")
 
-    # 5d. Probe 5: arm_vm_init (ORANGE bar at 0xff2af000) at 0xfffffff007447640 (file offset 0x447640)
+    # 5d. Probe 5: arm_vm_init (ORANGE bar at 0xff2af000) at file offset 0x447640
     probe5_part1 = assemble('''
         stp x29, x30, [sp, #-16]!
         mov x11, #0xf000
@@ -258,7 +258,7 @@ def main():
         subs x9, x9, #8
         b.hi 1b
     ''')
-    bl_vm_init = calc_bl(0xfffffff007447640 + len(probe5_part1), 0xfffffff007442618)
+    bl_vm_init = calc_bl(0x447640 + len(probe5_part1), 0x43e618)
     probe5_part2 = assemble('''
         ldp x29, x30, [sp], #16
         ret
@@ -266,7 +266,7 @@ def main():
     probe5 = probe5_part1 + bl_vm_init + probe5_part2
     assert len(probe5) == 48
     data[0x447640 : 0x447640 + len(probe5)] = probe5
-    data[0x43cf38 : 0x43cf3c] = calc_bl(0xfffffff007440f38, 0xfffffff007447640)
+    data[0x43cf38 : 0x43cf3c] = calc_bl(0x43cf38, 0x447640)
     print("[+] Injected ORANGE probe before arm_vm_init (0x447640, hooked 0x43cf38)")
 
     # 6. Master CPU & Topology fixes:
