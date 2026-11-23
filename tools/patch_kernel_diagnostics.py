@@ -213,7 +213,7 @@ def main():
         /* Load FB base KVA & rowbytes from vinfo at 0xfffffff007b2afb8 */
         mov x8, #0xafb8
         movk x8, #0x07b2, lsl #16
-        movk x8, #0xffff, lsl #32
+        movk x8, #0xfff0, lsl #32
         movk x8, #0xffff, lsl #48
         ldr x11, [x8]
         ldr w9, [x8, #-4]
@@ -387,7 +387,7 @@ def main():
         /* Load FB base KVA & rowbytes from vinfo */
         mov x8, #0xafb8
         movk x8, #0x07b2, lsl #16
-        movk x8, #0xffff, lsl #32
+        movk x8, #0xfff0, lsl #32
         movk x8, #0xffff, lsl #48
         ldr x11, [x8]
         ldr w9, [x8, #-4]
@@ -739,7 +739,7 @@ def main():
         /* Returns x1 = FB base, w9 = rowbytes from vinfo at 0xfffffff007b2afb8 */
         mov x8, #0xafb8
         movk x8, #0x07b2, lsl #16
-        movk x8, #0xffff, lsl #32
+        movk x8, #0xfff0, lsl #32
         movk x8, #0xffff, lsl #48
         ldr x1, [x8]
         ldr w9, [x8, #-4]
@@ -971,7 +971,7 @@ def main():
         /* Jump to 0xfffffff0077b3498 (success exit of load_init_program) */
         mov x16, #0x3498
         movk x16, #0x077b, lsl #16
-        movk x16, #0xffff, lsl #32
+        movk x16, #0xfff0, lsl #32
         movk x16, #0xffff, lsl #48
         br x16
 
@@ -1201,6 +1201,45 @@ def main():
     b_init_res = calc_bl(0xfffffff0077b3434, init_res_kva)
     data[0x7af434 : 0x7af438] = b_init_res
     print(f"[+] Hooked load_init_program result at 0x7af434 -> {hex(init_res_kva)} (offset +{hex(init_res_off)})")
+
+    # 19. Mach-O Loader: Bypass LOAD_FAILURE checks in parse_machfile and load_segment
+    # Check 1: !using_lcmain && validentry == 0 at 0xfffffff007848a6c (file offset 0x844a6c)
+    # Original: b.eq #0xfffffff0078494f4 (40 54 00 54) -> Patch with NOP so it falls through to mov w8, #1
+    assert data[0x844a6c : 0x844a70] == bytes.fromhex("40540054"), f"Unexpected at 0x844a6c: {data[0x844a6c:0x844a70].hex()}"
+    data[0x844a6c : 0x844a70] = bytes.fromhex("1f2003d5") # nop
+    print("[+] Patched parse_machfile check 1 (validentry check) at 0x844a6c -> nop")
+
+    # Check 2: needs_dynlinker && !dlp at 0xfffffff0078495ac & 0xfffffff0078495b0 (file offset 0x8455ac & 0x8455b0)
+    # Original: mov w9, #4 (89 00 80 52); csel w8, w8, w9, eq (08 01 89 1a)
+    assert data[0x8455ac : 0x8455b0] == bytes.fromhex("89008052"), f"Unexpected at 0x8455ac: {data[0x8455ac:0x8455b0].hex()}"
+    assert data[0x8455b0 : 0x8455b4] == bytes.fromhex("0801891a"), f"Unexpected at 0x8455b0: {data[0x8455b0:0x8455b4].hex()}"
+    data[0x8455ac : 0x8455b0] = bytes.fromhex("09008052") # mov w9, #0
+    data[0x8455b0 : 0x8455b4] = bytes.fromhex("1f2003d5") # nop
+    print("[+] Patched parse_machfile check 2 (needs_dynlinker check) at 0x8455ac..0x8455b0 -> mov w9, #0; nop")
+
+    # Check 3: thread_count == 0 at 0xfffffff007849600 (file offset 0x845600)
+    # Original: lsl w3, w8, #2 (03 75 1e 53)
+    assert data[0x845600 : 0x845604] == bytes.fromhex("03751e53"), f"Unexpected at 0x845600: {data[0x845600:0x845604].hex()}"
+    data[0x845600 : 0x845604] = bytes.fromhex("03008052") # mov w3, #0
+    print("[+] Patched parse_machfile check 3 (thread_count check) at 0x845600 -> mov w3, #0")
+
+    # Check 4: PAGEZERO unprotect check at 0xfffffff00784af70 (file offset 0x846f70)
+    # Original: mov w23, #4 (97 00 80 52)
+    assert data[0x846f70 : 0x846f74] == bytes.fromhex("97008052"), f"Unexpected at 0x846f70: {data[0x846f70:0x846f74].hex()}"
+    data[0x846f70 : 0x846f74] = bytes.fromhex("07008052") # mov w23, #0
+    print("[+] Patched load_segment check 4 (PAGEZERO unprotect) at 0x846f70 -> mov w23, #0")
+
+    # Check 5: PAGEZERO min_offset check at 0xfffffff00784b000 (file offset 0x847000)
+    # Original: mov w23, #4 (97 00 80 52)
+    assert data[0x847000 : 0x847004] == bytes.fromhex("97008052"), f"Unexpected at 0x847000: {data[0x847000:0x847004].hex()}"
+    data[0x847000 : 0x847004] = bytes.fromhex("07008052") # mov w23, #0
+    print("[+] Patched load_segment check 5 (PAGEZERO min_offset) at 0x847000 -> mov w23, #0")
+
+    # Check 6: load_unixthread thread_count check at 0xfffffff00784b398 (file offset 0x847398)
+    # Original: mov w0, #4 (80 00 80 52)
+    assert data[0x847398 : 0x84739c] == bytes.fromhex("80008052"), f"Unexpected at 0x847398: {data[0x847398:0x84739c].hex()}"
+    data[0x847398 : 0x84739c] = bytes.fromhex("00008052") # mov w0, #0
+    print("[+] Patched load_unixthread check 6 (thread_count check) at 0x847398 -> mov w0, #0")
 
     with open(kernel_out, 'wb') as f:
         f.write(data)
