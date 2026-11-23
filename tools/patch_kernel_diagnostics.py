@@ -269,6 +269,160 @@ def main():
     data[0x43cf38 : 0x43cf3c] = calc_bl(0x43cf38, 0x447640)
     print("[+] Injected ORANGE probe before arm_vm_init (0x447640, hooked 0x43cf38)")
 
+    # 5e. Probe 5b: Inside arm_vm_init before MMU alternate switch (PINK bar at 0xff2bf000) at file offset 0x447680
+    part1_alt = assemble('''
+        stp x29, x30, [sp, #-16]!
+        mov x11, #0xf000
+        movk x11, #0xff2b, lsl #16
+        mov w10, #0x007f
+        movk w10, #0xffff, lsl #16
+        mov x9, #0x5c00
+    1:  stp w10, w10, [x11], #8
+        subs x9, x9, #8
+        b.hi 1b
+    ''')
+    bl_alt = calc_bl(0x447680 + len(part1_alt), 0x44ec54)
+    part2_alt = assemble('''
+        ldp x29, x30, [sp], #16
+    ''')
+    b_back_alt = calc_b(0x447680 + len(part1_alt) + 4 + len(part2_alt), 0x43f21c)
+    probe5_alt = part1_alt + bl_alt + part2_alt + b_back_alt
+    assert len(probe5_alt) <= 64
+    data[0x447680 : 0x447680 + len(probe5_alt)] = probe5_alt
+    data[0x43f218 : 0x43f21c] = calc_b(0x43f218, 0x447680)
+    print("[+] Injected PINK probe before set_mmu_ttb_alternate at 0x447680 (hooked 0x43f218)")
+
+    # 5f. Probe 5c: TTBR0 mapping persist + Cyan bar at 0xff2cf000 at file offset 0x4476c0
+    part1_ttbr0 = assemble('''
+        stp x29, x30, [sp, #-16]!
+        ldr x10, [x19, #-8]
+        mov x11, #0x605
+        movk x11, #0xc000, lsl #16
+        str x11, [x10, #0x18]
+        ldr x8, [x19]
+        and x0, x8, #0xffffffffffff
+    ''')
+    bl_set_mmu = calc_bl(0x4476c0 + len(part1_ttbr0), 0x44ec64)
+    part2_ttbr0 = assemble('''
+        tlbi vmalle1is
+        dsb ish
+        isb
+        mov x11, #0xf000
+        movk x11, #0xff2c, lsl #16
+        mov w10, #0xffff
+        movk w10, #0xff00, lsl #16
+        mov x9, #0x5c00
+    1:  stp w10, w10, [x11], #8
+        subs x9, x9, #8
+        b.hi 1b
+        ldp x29, x30, [sp], #16
+    ''')
+    b_back_ttbr0 = calc_b(0x4476c0 + len(part1_ttbr0) + 4 + len(part2_ttbr0), 0x43f240)
+    probe_ttbr0 = part1_ttbr0 + bl_set_mmu + part2_ttbr0 + b_back_ttbr0
+    assert len(probe_ttbr0) <= 96
+    data[0x4476c0 : 0x4476c0 + len(probe_ttbr0)] = probe_ttbr0
+    data[0x43f228 : 0x43f22c] = calc_b(0x43f228, 0x4476c0)
+    data[0x43f22c : 0x43f240] = bytes.fromhex('1f2003d5' * 5)
+    print("[+] Injected TTBR0 persistence + CYAN probe at 0x4476c0 (hooked 0x43f228)")
+
+    # 5g. Probe 6: Return from arm_vm_init (YELLOW bar at 0xff2df000) at file offset 0x447730
+    body_vm_exit = assemble('''
+        mov x11, #0xf000
+        movk x11, #0xff2d, lsl #16
+        mov w10, #0xff00
+        movk w10, #0xffff, lsl #16
+        mov x9, #0x5c00
+    1:  stp w10, w10, [x11], #8
+        subs x9, x9, #8
+        b.hi 1b
+    ''')
+    b_back_vm_exit = calc_b(0x447730 + len(body_vm_exit), 0x43cf44)
+    probe_vm_exit = body_vm_exit + b_back_vm_exit
+    assert len(probe_vm_exit) <= 48
+    data[0x447730 : 0x447730 + len(probe_vm_exit)] = probe_vm_exit
+    data[0x43cf3c : 0x43cf40] = calc_b(0x43cf3c, 0x447730)
+    data[0x43cf40 : 0x43cf44] = bytes.fromhex('1f2003d5')
+    print("[+] Injected YELLOW probe at arm_vm_init return at 0x447730 (hooked 0x43cf3c)")
+
+    # 5h. Probe 7: After serial_init (WHITE bar at 0xff2ef000) at file offset 0x447770
+    body_serial_exit = assemble('''
+        mov x19, x0
+        mov x11, #0xf000
+        movk x11, #0xff2e, lsl #16
+        mov w10, #0xffff
+        movk w10, #0xffff, lsl #16
+        mov x9, #0x5c00
+    1:  stp w10, w10, [x11], #8
+        subs x9, x9, #8
+        b.hi 1b
+    ''')
+    b_back_serial_exit = calc_b(0x447770 + len(body_serial_exit), 0x43cf6c)
+    probe_serial_exit = body_serial_exit + b_back_serial_exit
+    assert len(probe_serial_exit) <= 48
+    data[0x447770 : 0x447770 + len(probe_serial_exit)] = probe_serial_exit
+    data[0x43cf60 : 0x43cf64] = calc_b(0x43cf60, 0x447770)
+    data[0x43cf64 : 0x43cf6c] = bytes.fromhex('1f2003d5' * 2)
+    print("[+] Injected WHITE probe after serial_init at 0x447770 (hooked 0x43cf60)")
+
+    # 5i. Probe 8: Right before PE_create_console (PURPLE bar at 0xff2ff000) at file offset 0x4477b0
+    body_before_console = assemble('''
+        str wzr, [x8]
+        mov x11, #0xf000
+        movk x11, #0xff2f, lsl #16
+        mov w10, #0x00ff
+        movk w10, #0xffff, lsl #16
+        mov x9, #0x5c00
+    1:  stp w10, w10, [x11], #8
+        subs x9, x9, #8
+        b.hi 1b
+    ''')
+    b_back_before_console = calc_b(0x4477b0 + len(body_before_console), 0x43d09c)
+    probe_before_console = body_before_console + b_back_before_console
+    assert len(probe_before_console) <= 48
+    data[0x4477b0 : 0x4477b0 + len(probe_before_console)] = probe_before_console
+    data[0x43d098 : 0x43d09c] = calc_b(0x43d098, 0x4477b0)
+    print("[+] Injected PURPLE probe before PE_create_console at 0x4477b0 (hooked 0x43d098)")
+
+    # 5j. Probe 9: Right after PE_create_console (LIME bar at 0xff30f000) at file offset 0x4477f0
+    body_after_console = assemble('''
+        mov x11, #0xf000
+        movk x11, #0xff30, lsl #16
+        mov w10, #0xff00
+        movk w10, #0xff00, lsl #16
+        mov x9, #0x5c00
+    1:  stp w10, w10, [x11], #8
+        subs x9, x9, #8
+        b.hi 1b
+    ''')
+    b_back_after_console = calc_b(0x4477f0 + len(body_after_console), 0x43d0a8)
+    probe_after_console = body_after_console + b_back_after_console
+    assert len(probe_after_console) <= 48
+    data[0x4477f0 : 0x4477f0 + len(probe_after_console)] = probe_after_console
+    data[0x43d0a0 : 0x43d0a4] = calc_b(0x43d0a0, 0x4477f0)
+    data[0x43d0a4 : 0x43d0a8] = bytes.fromhex('1f2003d5')
+    print("[+] Injected LIME probe after PE_create_console at 0x4477f0 (hooked 0x43d0a0)")
+
+    # 5k. Probe 10: Panic hook (RED bar at 0xff31f000) at file offset 0x447830
+    body_panic = assemble('''
+        mov x11, #0xf000
+        movk x11, #0xff31, lsl #16
+        mov w10, #0x0000
+        movk w10, #0xffff, lsl #16
+        mov x9, #0x5c00
+    1:  stp w10, w10, [x11], #8
+        subs x9, x9, #8
+        b.hi 1b
+        sub sp, sp, #32
+        stp x29, x30, [sp, #16]
+    ''')
+    b_back_panic = calc_b(0x447830 + len(body_panic), 0xa74be0)
+    probe_panic = body_panic + b_back_panic
+    assert len(probe_panic) <= 48
+    data[0x447830 : 0x447830 + len(probe_panic)] = probe_panic
+    data[0xa74bd8 : 0xa74bdc] = calc_b(0xa74bd8, 0x447830)
+    data[0xa74bdc : 0xa74be0] = bytes.fromhex('1f2003d5')
+    print("[+] Injected RED probe into _panic at 0x447830 (hooked 0xa74bd8)")
+
     # 6. Master CPU & Topology fixes:
     # 6a. Statically initialize topology_info at file offset 0x1b25a0 (KVA 0xfffffff0071b65a0)
     data[0x1b25a4 : 0x1b25a8] = (8).to_bytes(4, 'little')
@@ -307,7 +461,28 @@ def main():
     # 6h. In _ml_get_max_cpu_number at 0xfffffff007451390 (file offset 0x44d390): Force return 7
     patch_ml_max = assemble('mov w0, #7\nret')
     data[0x44d390 : 0x44d390 + len(patch_ml_max)] = patch_ml_max
-    print("[+] Applied Master CPU and Topology fixes (arm_init, ml_get_boot_cpu_number, ml_get_cpu_number_local, ml_get_max_cpu_number)")
+
+    # 6i. In _cpu_number at 0xfffffff00743eb74 (file offset 0x43ab74): Safe early-boot handling for TPIDR_EL1 == 0
+    patch_cpu_num = assemble('''
+        mrs x8, TPIDR_EL1
+        mov w0, #0
+        cbz x8, 1f
+        ldr x8, [x8, #456]
+        cbz x8, 1f
+        ldrsh w0, [x8]
+    1:  ret
+    ''')
+    assert len(patch_cpu_num) == 28
+    data[0x43ab74 : 0x43ab74 + len(patch_cpu_num)] = patch_cpu_num
+
+    # 6j. In _serial_init at 0xfffffff007a52c38 (file offset 0xa4ec38): Force return 0 (skip serial switch)
+    patch_serial = assemble('''
+        mov w0, #0
+        ret
+    ''')
+    assert len(patch_serial) == 8
+    data[0xa4ec38 : 0xa4ec38 + len(patch_serial)] = patch_serial
+    print("[+] Applied Master CPU and Topology fixes (arm_init, ml_get_boot_cpu_number, ml_get_cpu_number_local, ml_get_max_cpu_number, cpu_number, serial_init)")
 
     # 7. Entropy initialization fix:
     # 7a. PE_get_random_seed at 0xfffffff007a50148 (file offset 0xa4c148)
