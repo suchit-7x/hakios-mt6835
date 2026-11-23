@@ -454,14 +454,14 @@ def main():
         // Draw "*** KERNEL PANIC ***" at line 60, col 20 (visually from left)
         mov w1, #60
         madd x0, x1, x23, x22
-        add x0, x0, #80
+        add x0, x0, #2720
         adr x1, str_panic_title
         bl draw_string
 
         // Draw "CALLER: 0x" + hex(x20) at line 90
         mov w1, #90
         madd x0, x1, x23, x22
-        add x0, x0, #80
+        add x0, x0, #2720
         adr x1, str_caller
         bl draw_string
         mov x1, x20
@@ -470,7 +470,7 @@ def main():
         // Draw format string at line 120
         mov w1, #120
         madd x0, x1, x23, x22
-        add x0, x0, #80
+        add x0, x0, #2720
         adr x1, str_msg
         bl draw_string
         mov x1, x19
@@ -491,14 +491,14 @@ def main():
         // Line 60: "*** ASSERTION FAILED ***"
         mov w1, #60
         madd x0, x1, x23, x22
-        add x0, x0, #80
+        add x0, x0, #2720
         adr x1, str_assert_title
         bl draw_string
 
         // Line 90: "CALLER: 0x" + hex(caller)
         mov w1, #90
         madd x0, x1, x23, x22
-        add x0, x0, #80
+        add x0, x0, #2720
         adr x1, str_caller
         bl draw_string
         mov x1, x28
@@ -507,7 +507,7 @@ def main():
         // Line 120: "FILE: " + file
         mov w1, #120
         madd x0, x1, x23, x22
-        add x0, x0, #80
+        add x0, x0, #2720
         adr x1, str_file
         bl draw_string
         mov x1, x26
@@ -516,7 +516,7 @@ def main():
         // Line 150: "LINE: 0x" + hex(line)
         mov w1, #150
         madd x0, x1, x23, x22
-        add x0, x0, #80
+        add x0, x0, #2720
         adr x1, str_line
         bl draw_string
         mov x1, x27
@@ -525,7 +525,7 @@ def main():
         // Line 180: "EXPR: " + expr
         mov w1, #180
         madd x0, x1, x23, x22
-        add x0, x0, #80
+        add x0, x0, #2720
         adr x1, str_expr
         bl draw_string
         mov x1, x25
@@ -576,18 +576,18 @@ def main():
         movk w8, #0xffff, lsl #16
         b.ne 1f
         mov w8, #0
-    1:  str w8, [x5], #4
+    1:  str w8, [x5], #-4
         lsl w6, w6, #1
         subs w7, w7, #1
         b.ne char_pix
-        sub x5, x5, #32
+        add x5, x5, #32
         add x5, x5, x23
         subs w4, w4, #1
         b.ne char_row
 
-        add x19, x19, #32
-        sub x6, x19, x20
-        cmp x6, #2720
+        sub x19, x19, #32
+        sub x6, x20, x19
+        cmp x6, #2600
         b.lo str_next
         mov w4, #20
         madd x20, x4, x23, x20
@@ -625,15 +625,15 @@ def main():
         movk w8, #0xffff, lsl #16
         b.ne 3f
         mov w8, #0
-    3:  str w8, [x5], #4
+    3:  str w8, [x5], #-4
         lsl w6, w6, #1
         subs w7, w7, #1
         b.ne h_pix
-        sub x5, x5, #32
+        add x5, x5, #32
         add x5, x5, x23
         subs w4, w4, #1
         b.ne h_row
-        add x0, x0, #32
+        sub x0, x0, #32
         subs w20, w20, #4
         b.ge hex_loop
         ldp x19, x20, [sp, #16]
@@ -820,6 +820,17 @@ def main():
     b_skip_pmap_defaults = calc_b(0xfffffff007423f2c, 0xfffffff007423fa0)
     data[0x41ff2c : 0x41ff30] = b_skip_pmap_defaults
     print("[+] Patched pmap_bootstrap at 0x41ff2c to default max_asids=2048 and bypass /defaults assert")
+
+    # 8c. pmap_data_bootstrap bypass for missing DT /defaults node:
+    # Helper 1 at 0xfffffff007436d68 (file offset 0x432d68): force return (PV pool tunables assert line 2107)
+    data[0x432d68 : 0x432d6c] = bytes.fromhex('c0035fd6') # ret
+
+    # Helper 2 at 0xfffffff007436ec4 (file offset 0x432ec4): return 0 (pmap-io-ranges assert line 3570)
+    data[0x432ec4 : 0x432ecc] = bytes.fromhex('00008052c0035fd6') # mov w0, #0; ret
+
+    # Helper 3 at 0xfffffff0074372d8 (file offset 0x4332d8): force return (pmap-io-ranges copy assert line 3661)
+    data[0x4332d8 : 0x4332dc] = bytes.fromhex('c0035fd6') # ret
+    print("[+] Patched pmap_data_bootstrap helpers at 0x432d68, 0x432ec4, 0x4332d8 to bypass /defaults asserts")
 
     # 9. Video Console Text Mode & disableConsoleOutput fixes:
     # 9a. Force PE_create_console to call PE_initialize_console(&PE_state.video, kPETextMode):
