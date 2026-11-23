@@ -21,6 +21,15 @@ def calc_bl(src, dst):
     op = 0x94000000 | imm26
     return op.to_bytes(4, 'little')
 
+def calc_adrp(pc, target_page, rd):
+    pc_page = pc & ~0xfff
+    target_page = target_page & ~0xfff
+    diff_pages = (target_page - pc_page) >> 12
+    immlo = diff_pages & 3
+    immhi = (diff_pages >> 2) & 0x7ffff
+    op = 0x90000000 | (immlo << 29) | (immhi << 5) | rd
+    return op.to_bytes(4, 'little')
+
 def main():
     kernel_orig = '/home/suchit-7x/hackios/out/mach.development.bcm2837.orig'
     kernel_out = '/home/suchit-7x/hackios/out/mach.development.bcm2837'
@@ -892,6 +901,38 @@ def main():
     b_clear_dco = calc_b(0xfffffff007441078, 0xfffffff007441090)
     data[0x43d078 : 0x43d07c] = b_clear_dco
     print("[+] Patched arm_init at 0x43d078 to unconditionally clear disableConsoleOutput")
+
+    # 9b2. arm_init direct DRAM setup & bypass /chosen lookups at 0xfffffff0074410f8 (offset 0x43d0f8):
+    # Directly populate gDramBase = 0x40000000, gDramSize = 0x100000000 (4GB), paint TEAL probe (0xff31f000),
+    # and fall through directly to early_random_cpu_init (0xfffffff007441174) & machine_startup.
+    off_dram_init = 0xfffffff0074410f8 - 0xfffffff007004000
+    target_dram_len = 0x43d174 - 0x43d0f8 # 124 bytes (31 instructions)
+    p_dram_part1 = assemble('''
+        mov x8, #0x0000
+        movk x8, #0x4000, lsl #16
+    ''')
+    adrp_dram = calc_adrp(0xfffffff0074410f8 + len(p_dram_part1), 0xfffffff0071a0000, 9)
+    p_dram_part2 = assemble('''
+        str x8, [x9, #0x818]
+        mov x8, #0x0000
+        movk x8, #0x0001, lsl #32
+        str x8, [x9, #0x820]
+        mov x11, #0xf000
+        movk x11, #0xff31, lsl #16
+        mov w10, #0xff00
+        movk w10, #0x00ff, lsl #16
+        mov x9, #0x5c00
+    1:  stp w10, w10, [x11], #8
+        subs x9, x9, #8
+        b.hi 1b
+    ''')
+    p_dram_code = p_dram_part1 + adrp_dram + p_dram_part2
+    assert len(p_dram_code) <= target_dram_len
+    p_dram_nops = (target_dram_len - len(p_dram_code)) // 4
+    patch_dram_full = p_dram_code + (b'\x1f\x20\x03\xd5' * p_dram_nops)
+    assert len(patch_dram_full) == target_dram_len
+    data[off_dram_init : off_dram_init + target_dram_len] = patch_dram_full
+    print("[+] Patched arm_init at 0x43d0f8 to directly set gDramBase=0x40000000, gDramSize=4GB & bypass chosen lookups")
 
     # 9c. Patch _vc_colors 32-bit alpha byte to 0xFF (file offset 0x5228):
     for i in range(8):
