@@ -210,16 +210,34 @@ def main():
         mrs x20, esr_el1
         mrs x21, far_el1
 
-        /* Fill background box with Magenta (0xffff00ff) from 0xff38_0000 to 0xff48_0000 */
-        mov x11, #0x0000
-        movk x11, #0xff38, lsl #16
+        /* Load FB base KVA & rowbytes from vinfo at 0xfffffff007b2afb8 */
+        mov x8, #0xafb8
+        movk x8, #0x07b2, lsl #16
+        movk x8, #0xffff, lsl #32
+        movk x8, #0xffff, lsl #48
+        ldr x11, [x8]
+        ldr w9, [x8, #-4]
+        cbnz x11, 1f
+        mov x11, #0xf000
+        movk x11, #0xff1f, lsl #16
+    1:  cbnz w9, 2f
+        mov w9, #2944
+    2:
+        /* Fill background box with Magenta (0xffff00ff) from Row 580 to Row 720 (140 rows) */
+        mov w10, #580
+        madd x1, x9, x10, x11
         mov w10, #0x00ff
         movk w10, #0xffff, lsl #16
-        mov x9, #0x0000
-        movk x9, #0x10, lsl #16
-    1:  stp w10, w10, [x11], #8
-        subs x9, x9, #8
-        b.hi 1b
+        mov w12, #140
+    eb_loop:
+        mov x17, x1
+        mov x8, x9
+    3:  str w10, [x17], #4
+        subs x8, x8, #4
+        b.hi 3b
+        add x1, x1, x9
+        subs w12, w12, #1
+        b.ne eb_loop
 
         adr x12, exc_font_table
 
@@ -227,9 +245,11 @@ def main():
         mov w14, #0xffff
         movk w14, #0xffff, lsl #16
 
-        /* Line 1 at 0xff3af080 (Row 600, X=32): ELR */
-        mov x13, #0xf080
-        movk x13, #0xff3a, lsl #16
+        /* Line 1 at Row 600, X=32: ELR */
+        mov w10, #600
+        madd x13, x9, x10, x11
+        add x13, x13, #(32 * 4)
+
         /* 'E' (14), 'L' (16), 'R' (20), ':' (18) */
         mov w15, #14
         bl exc_draw_glyph
@@ -250,9 +270,11 @@ def main():
         subs w22, w22, #1
         b.ne elr_loop
 
-        /* Line 2 at 0xff3d3380 (Row 650, X=32): FAR */
-        mov x13, #0x3380
-        movk x13, #0xff3d, lsl #16
+        /* Line 2 at Row 650, X=32: FAR */
+        mov w10, #650
+        madd x13, x9, x10, x11
+        add x13, x13, #(32 * 4)
+
         /* 'F' (15), 'A' (10), 'R' (20), ':' (18) */
         mov w15, #15
         bl exc_draw_glyph
@@ -293,16 +315,15 @@ def main():
         tbz w18, #0, edc_skip
         str w14, [x1]
         str w14, [x1, #4]
-        str w14, [x1, #2944]
-        add x3, x1, #2944
+        str w14, [x1, x9]
+        add x3, x1, x9
         str w14, [x3, #4]
     edc_skip:
         lsr w18, w18, #1
         add x1, x1, #8
         subs w2, w2, #1
         b.ne edc_col
-        mov x3, #5888
-        add x16, x16, x3
+        add x16, x16, x9, lsl #1
         subs w17, w17, #1
         b.ne edc_row
         add x13, x13, #64
@@ -363,16 +384,34 @@ def main():
         mov x21, lr
 
     _render:
-        /* 1. Fill red box from 0xff38_0000 to 0xff48_0000 */
-        mov x11, #0x0000
-        movk x11, #0xff38, lsl #16
+        /* Load FB base KVA & rowbytes from vinfo */
+        mov x8, #0xafb8
+        movk x8, #0x07b2, lsl #16
+        movk x8, #0xffff, lsl #32
+        movk x8, #0xffff, lsl #48
+        ldr x11, [x8]
+        ldr w9, [x8, #-4]
+        cbnz x11, 1f
+        mov x11, #0xf000
+        movk x11, #0xff1f, lsl #16
+    1:  cbnz w9, 2f
+        mov w9, #2944
+    2:
+        /* Fill red box from Row 580 to Row 720 (140 rows) */
+        mov w10, #580
+        madd x1, x9, x10, x11
         mov w10, #0x0000
         movk w10, #0xffff, lsl #16
-        mov x9, #0x0000
-        movk x9, #0x10, lsl #16
-    1:  stp w10, w10, [x11], #8
-        subs x9, x9, #8
-        b.hi 1b
+        mov w12, #140
+    rb_loop:
+        mov x17, x1
+        mov x8, x9
+    3:  str w10, [x17], #4
+        subs x8, x8, #4
+        b.hi 3b
+        add x1, x1, x9
+        subs w12, w12, #1
+        b.ne rb_loop
 
         /* x12 = pointer to embedded font_table */
         adr x12, font_table
@@ -381,9 +420,10 @@ def main():
         mov w14, #0xffff
         movk w14, #0xffff, lsl #16
 
-        /* --- Line 1 at 0xff3af080 (Row 600, X=32): 'A0:XXXXXXXXXXXXXXXX' --- */
-        mov x13, #0xf080
-        movk x13, #0xff3a, lsl #16
+        /* Line 1 at Row 600, X=32: 'A0:XXXXXXXXXXXXXXXX' */
+        mov w10, #600
+        madd x13, x9, x10, x11
+        add x13, x13, #(32 * 4)
 
         /* Draw 'A' (10), '0' (0), ':' (18) */
         mov w15, #10
@@ -403,9 +443,10 @@ def main():
         subs w22, w22, #1
         b.ne a0_hex_loop
 
-        /* --- Line 2 at 0xff3d3380 (Row 650, X=32): 'L:XXXX  PC:XXXXXXXXXXXXXXXX' --- */
-        mov x13, #0x3380
-        movk x13, #0xff3d, lsl #16
+        /* Line 2 at Row 650, X=32: 'L:XXXX  PC:XXXXXXXXXXXXXXXX' */
+        mov w10, #650
+        madd x13, x9, x10, x11
+        add x13, x13, #(32 * 4)
 
         /* Draw 'L' (16), ':' (18) */
         mov w15, #16
@@ -465,16 +506,15 @@ def main():
         tbz w18, #0, dg_skip
         str w14, [x1]
         str w14, [x1, #4]
-        str w14, [x1, #2944]
-        add x3, x1, #2944
+        str w14, [x1, x9]
+        add x3, x1, x9
         str w14, [x3, #4]
     dg_skip:
         lsr w18, w18, #1
         add x1, x1, #8
         subs w2, w2, #1
         b.ne dg_col
-        mov x3, #5888
-        add x16, x16, x3
+        add x16, x16, x9, lsl #1
         subs w17, w17, #1
         b.ne dg_row
         add x13, x13, #64
@@ -649,6 +689,8 @@ def main():
     probe_code = '''
     .global machine_startup_probe
     .global kdebug_probe
+    .global draw_load_probe
+    .global draw_init_result
 
     machine_startup_probe:
         /* Draw Blue bar across row 490 (0xff360000) */
@@ -693,6 +735,22 @@ def main():
         br x16
 
     .align 4
+    get_fb_info:
+        /* Returns x1 = FB base, w9 = rowbytes from vinfo at 0xfffffff007b2afb8 */
+        mov x8, #0xafb8
+        movk x8, #0x07b2, lsl #16
+        movk x8, #0xffff, lsl #32
+        movk x8, #0xffff, lsl #48
+        ldr x1, [x8]
+        ldr w9, [x8, #-4]
+        cbnz x1, 1f
+        mov x1, #0xf000
+        movk x1, #0xff1f, lsl #16
+    1:  cbnz w9, 2f
+        mov w9, #2944
+    2:  ret
+
+    .align 4
     kdebug_probe:
         /* Preserve registers */
         stp x29, x30, [sp, #-48]!
@@ -727,27 +785,24 @@ def main():
     4:  add x8, x8, #4
         str w16, [x8, w15, uxtw #2]
 
-        /* 1. Draw progressive status bar at row 1350 (0xFF1FF000 + 1350 * 2944 = 0xFF5C9500) */
+        bl get_fb_info
+
+        /* 1. Draw progressive status bar at row 1350/1370 */
         cmp w20, #230
         b.hs check_milestones
 
         /* Calculate address in framebuffer: 24 bytes (6 pixels) per tick */
-        mov x9, #24
-        and x10, x20, #0x7f
-        mul x9, x9, x10
+        mov x10, #24
+        and x11, x20, #0x7f
+        mul x10, x10, x11
 
         cmp w20, #115
-        b.hs 1f
-        /* Base row 1350 = 0xff5c9500 */
-        mov x11, #0x9500
-        movk x11, #0xff5c, lsl #16
-        b 2f
-    1:
-        /* Base row 1370 = 0xff5d7b00 */
-        mov x11, #0x7b00
-        movk x11, #0xff5d, lsl #16
-    2:
-        add x11, x11, x9
+        b.hs 5f
+        mov w12, #1350
+        b 6f
+    5:  mov w12, #1370
+    6:  madd x11, x9, x12, x1
+        add x11, x11, x10
 
         /* Color: Solid Green 0xff00ff00 */
         mov w10, #0xff00
@@ -759,7 +814,7 @@ def main():
         stp w10, w10, [x11]
         stp w10, w10, [x11, #8]
         stp w10, w10, [x11, #16]
-        add x11, x11, #2944
+        add x11, x11, x9
         subs w12, w12, #1
         b.ne draw_meter_loop
 
@@ -802,55 +857,51 @@ def main():
         b done_probe
 
     draw_load:
-        /* Row 1460 (0xff618600): Bright Yellow (0xffffff00) across all 720 px */
-        mov x11, #0x8600
-        movk x11, #0xff61, lsl #16
-        mov w10, #0xff00
-        movk w10, #0xffff, lsl #16
+        /* Row 1460: Bright Yellow (0xffffff00) */
+        mov w10, #1460
+        mov w14, #0xff00
+        movk w14, #0xffff, lsl #16
         b draw_full_milestone_bar
 
     draw_idle:
-        /* Row 1480 (0xff626c00): Bright Cyan (0xff00ffff) across all 720 px */
-        mov x11, #0x6c00
-        movk x11, #0xff62, lsl #16
-        mov w10, #0xffff
-        movk w10, #0x00ff, lsl #16
+        /* Row 1480: Bright Cyan (0xff00ffff) */
+        mov w10, #1480
+        mov w14, #0xffff
+        movk w14, #0x00ff, lsl #16
         b draw_full_milestone_bar
 
     draw_pe_iokit:
-        /* Row 1400 (0xff5ed400): Bright Magenta (0xffff00ff) across all 720 px */
-        mov x11, #0xd400
-        movk x11, #0xff5e, lsl #16
-        mov w10, #0x00ff
-        movk w10, #0xffff, lsl #16
+        /* Row 1400: Bright Magenta (0xffff00ff) */
+        mov w10, #1400
+        mov w14, #0x00ff
+        movk w14, #0xffff, lsl #16
         b draw_full_milestone_bar
 
     draw_machine:
-        /* Row 1420 (0xff5fba00): Bright Orange (0xffff8000) across all 720 px */
-        mov x11, #0xba00
-        movk x11, #0xff5f, lsl #16
-        mov w10, #0x8000
-        movk w10, #0xffff, lsl #16
+        /* Row 1420: Bright Orange (0xffff8000) */
+        mov w10, #1420
+        mov w14, #0x8000
+        movk w14, #0xffff, lsl #16
         b draw_full_milestone_bar
 
     draw_bsd:
-        /* Row 1440 (0xff60a000): Bright White (0xffffffff) across all 720 px */
-        mov x11, #0xa000
-        movk x11, #0xff60, lsl #16
-        mov w10, #0xffff
-        movk w10, #0xffff, lsl #16
+        /* Row 1440: Bright White (0xffffffff) */
+        mov w10, #1440
+        mov w14, #0xffff
+        movk w14, #0xffff, lsl #16
         b draw_full_milestone_bar
 
     draw_full_milestone_bar:
-        /* Draw 8 rows of the color */
+        bl get_fb_info
+        madd x11, x9, x10, x1
         mov w12, #8
     bar_rows_loop:
         mov x17, x11
-        mov x9, #0x2c00
-    2:  stp w10, w10, [x17], #8
-        subs x9, x9, #8
-        b.hi 2b
-        add x11, x11, #2944
+        mov x8, x9
+    7:  str w14, [x17], #4
+        subs x8, x8, #4
+        b.hi 7b
+        add x11, x11, x9
         subs w12, w12, #1
         b.ne bar_rows_loop
 
@@ -868,21 +919,23 @@ def main():
         stp x29, x30, [sp, #-48]!
         stp x19, x20, [sp, #16]
         stp x21, x22, [sp, #32]
-        /* Row 1460 (0xff618600): Bright Yellow (0xffffff00) across all 720 px */
-        mov x11, #0x8600
-        movk x11, #0xff61, lsl #16
+
+        bl get_fb_info
+        mov w10, #1460
+        madd x11, x9, x10, x1
         mov w10, #0xff00
         movk w10, #0xffff, lsl #16
         mov w12, #8
     bar_rows_loop_load:
         mov x17, x11
-        mov x9, #0x2c00
-    3:  stp w10, w10, [x17], #8
-        subs x9, x9, #8
-        b.hi 3b
-        add x11, x11, #2944
+        mov x8, x9
+    8:  str w10, [x17], #4
+        subs x8, x8, #4
+        b.hi 8b
+        add x11, x11, x9
         subs w12, w12, #1
         b.ne bar_rows_loop_load
+
         dsb sy
         isb
         ldp x21, x22, [sp, #32]
@@ -897,18 +950,19 @@ def main():
         cbnz w0, init_failed
 
         /* SUCCESS: Paint Bright Lime Green (0xff00ff00) across Row 500..520 */
-        mov x1, #0x6c00
-        movk x1, #0xff36, lsl #16
+        bl get_fb_info
+        mov w10, #500
+        madd x1, x9, x10, x1
         mov w2, #0xff00
         movk w2, #0x00ff, lsl #16
         mov w12, #20
     succ_row:
         mov x17, x1
-        mov x9, #2944
-    1:  str w2, [x17], #4
-        subs x9, x9, #4
-        b.hi 1b
-        add x1, x1, #2944
+        mov x8, x9
+    9:  str w2, [x17], #4
+        subs x8, x8, #4
+        b.hi 9b
+        add x1, x1, x9
         subs w12, w12, #1
         b.ne succ_row
         dsb sy
@@ -925,19 +979,21 @@ def main():
         /* Save errno in w25 */
         mov w25, w0
 
+        bl get_fb_info
+
         /* 1. Paint large Bright RED (0xffff0000) banner across Row 600..680 */
-        mov x1, #0xe400
-        movk x1, #0xff3a, lsl #16
+        mov w10, #600
+        madd x1, x9, x10, x1
         mov w2, #0x0000
         movk w2, #0xffff, lsl #16
         mov w12, #80
     err_bg_row:
         mov x17, x1
-        mov x9, #2944
-    2:  str w2, [x17], #4
-        subs x9, x9, #4
-        b.hi 2b
-        add x1, x1, #2944
+        mov x8, x9
+    10: str w2, [x17], #4
+        subs x8, x8, #4
+        b.hi 10b
+        add x1, x1, x9
         subs w12, w12, #1
         b.ne err_bg_row
 
@@ -947,9 +1003,11 @@ def main():
         mov w14, #0xffff
         movk w14, #0xffff, lsl #16
 
-        /* Row 625, X=64: 0xff1ff000 + 625 * 2944 + 64 * 4 = 0xff3c0300 */
-        mov x13, #0x0300
-        movk x13, #0xff3c, lsl #16
+        /* Row 625, X=64 */
+        bl get_fb_info
+        mov w10, #625
+        madd x13, x9, x10, x1
+        add x13, x13, #(64 * 4)
 
         /* Draw 'E' (14), 'R' (20), 'R' (20), ':' (18), ' ' (19) */
         mov w15, #14
@@ -1013,16 +1071,15 @@ def main():
         tbz w18, #0, dig_skip
         str w14, [x1]
         str w14, [x1, #4]
-        str w14, [x1, #2944]
-        add x3, x1, #2944
+        str w14, [x1, x9]
+        add x3, x1, x9
         str w14, [x3, #4]
     dig_skip:
         lsr w18, w18, #1
         add x1, x1, #8
         subs w2, w2, #1
         b.ne dig_col
-        mov x3, #5888
-        add x16, x16, x3
+        add x16, x16, x9, lsl #1
         subs w17, w17, #1
         b.ne dig_row
         add x13, x13, #64
