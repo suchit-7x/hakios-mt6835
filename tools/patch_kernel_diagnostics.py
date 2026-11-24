@@ -1086,6 +1086,14 @@ def main():
     data[0x847398 : 0x84739c] = bytes.fromhex("00008052") # mov w0, #0
     print("[+] Patched load_unixthread check 6 (thread_count check) at 0x847398 -> mov w0, #0")
 
+    # 13. IOKit IOPlatformExpert: Bypass assert(gIOOptionsEntry != NULL) at line 1695
+    # Location: 0xfffffff0079cec38 (file offset 0x9cac38)
+    # Original: 680500b4 (cbz x8, #0xfffffff0079cece4)
+    # Patch:    1f2003d5 (nop)
+    assert data[0x9cac38 : 0x9cac3c] == bytes.fromhex("680500b4"), f"Unexpected at 0x9cac38: {data[0x9cac38:0x9cac3c].hex()}"
+    data[0x9cac38 : 0x9cac3c] = bytes.fromhex("1f2003d5") # nop
+    print("[+] Patched IOPlatformExpert assert (gIOOptionsEntry != NULL) at 0x9cac38 -> nop")
+
     with open(kernel_out, 'wb') as f:
         f.write(data)
     print(f"[+] Successfully wrote clean patched kernel ({len(data)} bytes) to: {kernel_out}")
