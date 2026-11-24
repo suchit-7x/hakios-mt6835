@@ -419,7 +419,7 @@ def main():
         // sp is stack pointer before sub sp, sp, #32
 
         mov x19, x0        // x19 = format / file
-        mov x20, x30       // x20 = lr
+        mov x14, x30       // x14 = caller lr
         mov x21, sp        // x21 = incoming sp
 
         // Map FB base: 0xff1ef000 (boot_args->Video.v_baseAddr)
@@ -427,18 +427,17 @@ def main():
         movk x22, #0xff1e, lsl #16
         mov x23, #2944              // rowBytes
 
-        // 1. Draw RED header bar (40 lines)
+        // 1. Draw RED header bar (40 lines * 2944 = 117760 = 0x1cc00 bytes)
         mov x0, x22
         mov w1, #0x0000
         movk w1, #0xffff, lsl #16   // ARGB: Red
-        mov x2, #0xe000             // 40 lines * 720 * 4 = 115200 bytes
+        mov w2, #0xcc00
+        movk w2, #1, lsl #16
     1:  stp w1, w1, [x0], #8
         subs x2, x2, #8
         b.hi 1b
 
         // 2. Clear background black for 800 lines below header
-        mov w1, #40
-        madd x0, x1, x23, x22
         mov w2, #0x0000
         movk w2, #0x24, lsl #16     // 800 lines * 2944
     2:  stp xzr, xzr, [x0], #8
@@ -451,17 +450,17 @@ def main():
         movk x24, #0xfff0, lsl #32
         movk x24, #0xffff, lsl #48  // x24 = iso_font
 
-        // Initial draw cursor: line 60, col 200
+        // Initial draw cursor in x20: line 60, col 200
         mov w1, #60
-        madd x0, x1, x23, x22
-        add x0, x0, #200
+        madd x20, x1, x23, x22
+        add x20, x20, #200
 
         // Check if called from __assert (0xfffffff007a78c2c)
         mov x8, #0x8c2c
         movk x8, #0x07a7, lsl #16
         movk x8, #0xfff0, lsl #32
         movk x8, #0xffff, lsl #48
-        cmp x20, x8
+        cmp x14, x8
         b.eq is_assert
 
         // Check if called from panic_with_arm_saved_state (0xfffffff007a82f98)
@@ -469,53 +468,88 @@ def main():
         movk x8, #0x07a8, lsl #16
         movk x8, #0xfff0, lsl #32
         movk x8, #0xffff, lsl #48
-        cmp x20, x8
+        cmp x14, x8
         b.eq is_saved_state
 
     is_panic:
         adr x1, str_panic_title
         bl draw_line_str
         adr x1, str_caller
-        mov x2, x20
+        mov x2, x14
         bl draw_line_hex
         adr x1, str_msg
+        mov x0, x20
         bl draw_string
         mov x1, x19
-        bl draw_line_str
+        bl draw_string
+        bl advance_line
         b hang
 
     is_saved_state:
         ldr x25, [x21, #0]     // reason string pointer
-        ldr x26, [x21, #0x128] // faulting pc
-        ldr x27, [x21, #0x118] // faulting lr
-        ldr x28, [x21, #0x138] // faulting far
-        ldr x29, [x21, #0x140] // faulting esr
+        ldr x15, [x21, #24]    // saved_state pointer
 
         adr x1, str_exc_title
         bl draw_line_str
-        adr x1, str_reason
-        bl draw_string
-        mov x1, x25
-        bl draw_line_str
+
+        adr x1, str_state_ptr
+        mov x2, x15
+        bl draw_line_hex
+
+        // Verify x15 is a valid kernel pointer
+        cbz x15, no_state
+        lsr x8, x15, #48
+        mov w9, #0xffff
+        cmp w8, w9
+        b.ne no_state
+
+        // Read registers directly from saved_state:
         adr x1, str_fpc
-        mov x2, x26
+        ldr x2, [x15, #264]   // PC
         bl draw_line_hex
+
         adr x1, str_flr
-        mov x2, x27
+        ldr x2, [x15, #248]   // LR
         bl draw_line_hex
+
         adr x1, str_ffar
-        mov x2, x28
+        ldr x2, [x15, #280]   // FAR
         bl draw_line_hex
+
         adr x1, str_fesr
-        mov x2, x29
+        ldr w2, [x15, #288]   // ESR
         bl draw_line_hex
+
+        adr x1, str_fsp
+        ldr x2, [x15, #256]   // SP
+        bl draw_line_hex
+
+        // Print reason
+        adr x1, str_reason
+        mov x0, x20
+        bl draw_string
+        cbz x25, 1f
+        lsr x8, x25, #48
+        mov w9, #0xffff
+        cmp w8, w9
+        b.eq 2f
+    1:  adr x1, str_null
+        b 3f
+    2:  mov x1, x25
+    3:  bl draw_string
+        bl advance_line
+        b hang
+
+    no_state:
+        adr x1, str_null
+        bl draw_line_str
         b hang
 
     is_assert:
-        ldr x25, [x21, #0x10] // expr
+        ldr x25, [x21, #16]   // expr
         ldr x26, [x21, #0]    // file
         ldr x27, [x21, #8]    // line
-        ldr x28, [x21, #0x28] // caller
+        ldr x28, [x21, #40]   // caller lr
 
         adr x1, str_assert_title
         bl draw_line_str
@@ -523,52 +557,64 @@ def main():
         mov x2, x28
         bl draw_line_hex
         adr x1, str_file
+        mov x0, x20
         bl draw_string
         mov x1, x26
-        bl draw_line_str
+        bl draw_string
+        bl advance_line
         adr x1, str_line
         mov x2, x27
         bl draw_line_hex
         adr x1, str_expr
+        mov x0, x20
         bl draw_string
         mov x1, x25
-        bl draw_line_str
+        bl draw_string
+        bl advance_line
 
     hang:
         wfe
         b hang
 
     draw_line_hex:
-        stp x29, x30, [sp, #-16]!
-        str x2, [sp, #-16]!
+        stp x29, x30, [sp, #-32]!
+        str x2, [sp, #16]
+        mov x0, x20
         bl draw_string
-        ldr x1, [sp], #16
+        ldr x1, [sp, #16]
         bl draw_hex
-        b newline_ret
+        ldp x29, x30, [sp], #32
+        b advance_line
 
     draw_line_str:
         stp x29, x30, [sp, #-16]!
+        mov x0, x20
         bl draw_string
-    newline_ret:
+        ldp x29, x30, [sp], #16
+        b advance_line
+
+    advance_line:
         mov w4, #30
         madd x20, x4, x23, x20
         mov x0, x20
-        ldp x29, x30, [sp], #16
         ret
 
     draw_string:
-        stp x29, x30, [sp, #-32]!
-        stp x19, x20, [sp, #16]
-        mov x19, x0
-        mov x20, x0
+        stp x29, x30, [sp, #-16]!
+        mov x9, x0
+        mov x10, x0
 
-        cbnz x1, 1f
-        adr x1, str_null
+        cbz x1, 2f
+        lsr x8, x1, #48
+        mov w4, #0xffff
+        cmp w8, w4
+        b.eq 1f
+    2:  adr x1, str_null
     1:
     str_next:
         ldrb w2, [x1], #1
         cbz w2, str_done
-        cmp w2, #'\n'
+        cmp w2, #10
         b.eq str_newline
         cmp w2, #32
         b.lo str_space
@@ -578,8 +624,8 @@ def main():
 
     str_newline:
         mov w4, #20
-        madd x20, x4, x23, x20
-        mov x19, x20
+        madd x10, x4, x23, x10
+        mov x9, x10
         b str_next
 
     str_space:
@@ -587,17 +633,13 @@ def main():
     str_draw_c:
         add x3, x24, x2, lsl #4
         mov w4, #16
-        mov x5, x19
+        mov x5, x9
     char_row:
         ldrb w6, [x3], #1
         mov w7, #8
     char_pix:
-        tst w6, #0x80
-        mov w8, #0
-        movk w8, #0xffff, lsl #16
-        b.ne 1f
-        mov w8, #0
-    1:  str w8, [x5], #4
+        sbfx w8, w6, #7, #1
+        str w8, [x5], #4
         lsl w6, w6, #1
         subs w7, w7, #1
         b.ne char_pix
@@ -606,58 +648,60 @@ def main():
         subs w4, w4, #1
         b.ne char_row
 
-        add x19, x19, #32
-        sub x6, x19, x20
+        add x9, x9, #32
+        sub x6, x9, x10
         cmp x6, #2600
         b.lo str_next
         mov w4, #20
-        madd x20, x4, x23, x20
-        mov x19, x20
+        madd x10, x4, x23, x10
+        mov x9, x10
         b str_next
 
     str_done:
-        mov x0, x19
-        ldp x19, x20, [sp, #16]
-        ldp x29, x30, [sp], #32
+        mov x0, x9
+        ldp x29, x30, [sp], #16
         ret
 
     draw_hex:
-        stp x29, x30, [sp, #-32]!
-        mov x16, x1             // value
-        sub sp, sp, #32         // 32-byte hex string buffer
-        mov x17, sp             // dst
-        mov w18, #60            // shift
+        stp x29, x30, [sp, #-48]!
+        mov x12, x0
+        mov x13, x1
+        add x14, sp, #16
+        mov w1, #0x7830
+        strh w1, [x14], #2
+        mov w15, #60
     hex_loop:
-        lsr x1, x16, x18
+        lsr x1, x13, x15
         and w2, w1, #0xf
-        cmp w2, #10
-        b.lo 2f
-        add w2, w2, #('A' - 10)
-        b 3f
-    2:  add w2, w2, #'0'
-    3:  strb w2, [x17], #1
-        subs w18, w18, #4
+        add w2, w2, #'0'
+        cmp w2, #'9'
+        b.ls 1f
+        add w2, w2, #7
+    1:  strb w2, [x14], #1
+        subs w15, w15, #4
         b.ge hex_loop
-        strb wzr, [x17]         // null terminator
-        mov x1, sp              // string ptr
+        strb wzr, [x14]
+        mov x0, x12
+        add x1, sp, #16
         bl draw_string
-        add sp, sp, #32
-        ldp x29, x30, [sp], #32
+        ldp x29, x30, [sp], #48
         ret
 
-    str_panic_title:  .asciz "*** KERNEL PANIC ***"
+    str_panic_title:  .asciz "*** PANIC ***"
     str_assert_title: .asciz "*** ASSERT ***"
     str_exc_title:    .asciz "*** EXCEPTION PANIC ***"
-    str_caller:       .asciz "CALLER: 0x"
+    str_caller:       .asciz "CALLER: "
     str_msg:          .asciz "MSG: "
     str_file:         .asciz "FILE: "
-    str_line:         .asciz "LINE: 0x"
+    str_line:         .asciz "LINE: "
     str_expr:         .asciz "EXPR: "
     str_reason:       .asciz "REASON: "
-    str_fpc:          .asciz "PC:  0x"
-    str_flr:          .asciz "LR:  0x"
-    str_ffar:         .asciz "FAR: 0x"
-    str_fesr:         .asciz "ESR: 0x"
+    str_state_ptr:    .asciz "STATE: "
+    str_fpc:          .asciz "PC:  "
+    str_flr:          .asciz "LR:  "
+    str_ffar:         .asciz "FAR: "
+    str_fesr:         .asciz "ESR: "
+    str_fsp:          .asciz "SP:  "
     str_null:         .asciz "(null)"
     '''
     probe_panic = assemble(panic_logger_code)
