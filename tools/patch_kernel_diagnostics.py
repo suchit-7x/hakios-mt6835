@@ -487,41 +487,41 @@ def main():
 
     is_saved_state:
         ldr x25, [x21, #0]     // reason string pointer
-        ldr x15, [x21, #24]    // saved_state pointer
+        ldr x26, [x21, #24]    // saved_state pointer (in callee-saved x26!)
 
         adr x1, str_exc_title
         bl draw_line_str
 
         adr x1, str_state_ptr
-        mov x2, x15
+        mov x2, x26
         bl draw_line_hex
 
-        // Verify x15 is a valid kernel pointer
-        cbz x15, no_state
-        lsr x8, x15, #48
+        // Verify x26 is a valid kernel pointer
+        cbz x26, no_state
+        lsr x8, x26, #48
         mov w9, #0xffff
         cmp w8, w9
         b.ne no_state
 
         // Read registers directly from saved_state:
         adr x1, str_fpc
-        ldr x2, [x15, #264]   // PC
+        ldr x2, [x26, #264]   // PC
         bl draw_line_hex
 
         adr x1, str_flr
-        ldr x2, [x15, #248]   // LR
+        ldr x2, [x26, #248]   // LR
         bl draw_line_hex
 
         adr x1, str_ffar
-        ldr x2, [x15, #280]   // FAR
+        ldr x2, [x26, #280]   // FAR
         bl draw_line_hex
 
         adr x1, str_fesr
-        ldr w2, [x15, #288]   // ESR
+        ldr w2, [x26, #288]   // ESR
         bl draw_line_hex
 
         adr x1, str_fsp
-        ldr x2, [x15, #256]   // SP
+        ldr x2, [x26, #256]   // SP
         bl draw_line_hex
 
         // Print reason
@@ -638,9 +638,9 @@ def main():
         ldrb w6, [x3], #1
         mov w7, #8
     char_pix:
-        sbfx w8, w6, #7, #1
+        sbfx w8, w6, #0, #1
         str w8, [x5], #4
-        lsl w6, w6, #1
+        lsr w6, w6, #1
         subs w7, w7, #1
         b.ne char_pix
         sub x5, x5, #32
@@ -669,16 +669,16 @@ def main():
         add x14, sp, #16
         mov w1, #0x7830
         strh w1, [x14], #2
-        mov w15, #60
+        mov w11, #60
     hex_loop:
-        lsr x1, x13, x15
+        lsr x1, x13, x11
         and w2, w1, #0xf
         add w2, w2, #'0'
         cmp w2, #'9'
         b.ls 1f
         add w2, w2, #7
     1:  strb w2, [x14], #1
-        subs w15, w15, #4
+        subs w11, w11, #4
         b.ge hex_loop
         strb wzr, [x14]
         mov x0, x12
