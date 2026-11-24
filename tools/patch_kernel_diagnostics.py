@@ -776,17 +776,50 @@ def main():
     print(f"[+] Injected safe preemption helpers at 0x447c00 ({len(preempt_helpers)} bytes, hooked 0x441c2c, 0x441c40, 0x441c54, 0x441c9c, 0x441c94)")
 
     # 6. Master CPU & Topology fixes:
-    # 6a. Statically initialize topology_info at file offset 0x1b25a0 (KVA 0xfffffff0071b65a0)
-    data[0x1b25a4 : 0x1b25a8] = (8).to_bytes(4, 'little')
-    data[0x1b25a8 : 0x1b25ac] = (7).to_bytes(4, 'little')
-    data[0x1b25c8 : 0x1b25d0] = (0xfffffff0071b6198).to_bytes(8, 'little')
-    data[0x1b25d0 : 0x1b25d8] = (0xfffffff0071b6558).to_bytes(8, 'little')
+    # 6a. Statically initialize topology_cluster[0] at file offset 0x1b2558 (KVA 0xfffffff0071b6558)
+    data[0x1b2558 : 0x1b255c] = (0).to_bytes(4, 'little')    # cluster_id = 0
+    data[0x1b255c : 0x1b2560] = (0).to_bytes(4, 'little')    # cluster_type = CLUSTER_TYPE_SMP (0)
+    data[0x1b2560 : 0x1b2564] = (8).to_bytes(4, 'little')    # num_cpus = 8
+    data[0x1b2564 : 0x1b2568] = (0).to_bytes(4, 'little')    # first_cpu_id = 0
+    data[0x1b2568 : 0x1b2570] = (0xff).to_bytes(8, 'little') # cpu_mask = 0xff
 
-    # 6b. Statically initialize cpu_data_entries at file offset 0x1b2198 (KVA 0xfffffff0071b6198)
+    # 6b. Statically initialize topology_info at file offset 0x1b25a0 (KVA 0xfffffff0071b65a0)
+    data[0x1b25a0 : 0x1b25a4] = (1).to_bytes(4, 'little')    # version = 1
+    data[0x1b25a4 : 0x1b25a8] = (8).to_bytes(4, 'little')    # num_cpus = 8
+    data[0x1b25a8 : 0x1b25ac] = (7).to_bytes(4, 'little')    # max_cpu_id = 7
+    data[0x1b25ac : 0x1b25b0] = (1).to_bytes(4, 'little')    # num_clusters = 1 (CRITICAL FIX FOR SCHED_CLUTCH!)
+    data[0x1b25b0 : 0x1b25b4] = (0).to_bytes(4, 'little')    # max_cluster_id = 0
+    data[0x1b25b4 : 0x1b25b8] = (0).to_bytes(4, 'little')    # max_die_id = 0
+    data[0x1b25b8 : 0x1b25c0] = (0xfffffff0071b6198).to_bytes(8, 'little') # cpus ptr
+    data[0x1b25c0 : 0x1b25c8] = (0xfffffff0071b6558).to_bytes(8, 'little') # clusters ptr
+    data[0x1b25c8 : 0x1b25d0] = (0xfffffff0071b6198).to_bytes(8, 'little') # boot_cpu ptr
+    data[0x1b25d0 : 0x1b25d8] = (0xfffffff0071b6558).to_bytes(8, 'little') # boot_cluster ptr
+    data[0x1b25d8 : 0x1b25dc] = (0).to_bytes(4, 'little')    # chip_revision = 0
+    data[0x1b25dc : 0x1b25e0] = (1).to_bytes(4, 'little')    # cluster_types = (1 << CLUSTER_TYPE_SMP) = 1
+    data[0x1b25e0 : 0x1b25e4] = (8).to_bytes(4, 'little')    # cluster_type_num_cpus[0] = 8
+    data[0x1b25ec : 0x1b25f0] = (1).to_bytes(4, 'little')    # cluster_type_num_clusters[0] = 1
+
+    # 6c. Statically initialize cpu_data_entries at file offset 0x1b2198 (KVA 0xfffffff0071b6198)
     for c in range(8):
         c_off = 0x1b2198 + c * 0x78
         data[c_off : c_off + 4] = c.to_bytes(4, 'little')
         data[c_off + 4 : c_off + 8] = c.to_bytes(4, 'little')
+        data[c_off + 8 : c_off + 12] = (0).to_bytes(4, 'little')
+        data[c_off + 12 : c_off + 16] = (0).to_bytes(4, 'little')
+        data[c_off + 16 : c_off + 20] = (0).to_bytes(4, 'little')
+        data[c_off + 112 : c_off + 116] = (0).to_bytes(4, 'little')
+        data[c_off + 116 : c_off + 120] = c.to_bytes(4, 'little')
+
+    # 6c2. In _ml_parse_cpu_topology at 0xfffffff007450320 (file offset 0x44c320): Force return (protect static tables)
+    data[0x44c320 : 0x44c324] = bytes.fromhex('c0035fd6') # ret
+
+    # 6c3. In _ml_get_cluster_count at 0xfffffff00745124c (file offset 0x44d24c): Force return 1
+    patch_ml_cluster = assemble('mov w0, #1\nret')
+    data[0x44d24c : 0x44d24c + len(patch_ml_cluster)] = patch_ml_cluster
+
+    # 6c4. In _ml_get_boot_cluster_type at 0xfffffff007451268 (file offset 0x44d268): Force return 0 (CLUSTER_TYPE_SMP)
+    patch_ml_cluster_type = assemble('mov w0, #0\nret')
+    data[0x44d268 : 0x44d268 + len(patch_ml_cluster_type)] = patch_ml_cluster_type
 
     # 6c. In arm_init at 0xfffffff007440dc4 (file offset 0x43cdc4):
     # Replace `bl _ml_get_boot_cpu_number` (4 bytes) with `mov w0, #0`
