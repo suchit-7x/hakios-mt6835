@@ -157,7 +157,9 @@ def build_ramdisk():
     assert part_bytes % 512 == 0, "Partition size not sector-aligned!"
     print(f"[+] Clean FAT32 partition: {part_bytes} bytes ({part_sectors} sectors)")
 
-    # 2. Build MBR sector (LBA 0) with Partition 1 starting at LBA 2048
+    # 2. Build MBR sector (LBA 0) with:
+    #    Partition 1: FAT32 LBA at LBA 2048 (37 MiB)
+    #    MBR contains ONLY Partition 1 so EDK2 / UniXNU sees a single clean FAT32 volume.
     mbr = bytearray(512)
     # Partition 1 entry at 0x1BE (16 bytes)
     struct.pack_into("<BBBBBBBBII", mbr, 0x1be,
@@ -166,12 +168,18 @@ def build_ramdisk():
         0x0c,             # Partition type 0x0C (FAT32 with LBA)
         0xfe, 0xff, 0xff, # End CHS
         2048,             # Starting LBA (1 MiB alignment)
-        part_sectors      # Sector count
+        part_sectors      # Sector count (75776 sectors)
     )
+    # Partition entries 2, 3, 4 remain all zeros (16 bytes * 3 at 0x1CE)
     mbr[510] = 0x55
     mbr[511] = 0xaa
 
-    # 3. Assemble full MBR disk: LBA 0 (MBR) + LBA 1..2047 (Padding) + LBA 2048.. (FAT32 partition)
+    # 3. Assemble full MBR disk:
+    # LBA 0: MBR (512 bytes)
+    # LBA 1..2047: 1 MiB alignment padding
+    # LBA 2048..77823: FAT32 partition (37 MiB)
+    # LBA 77824..86015: root.apfs (4 MiB, exactly at offset 38 MiB = 0x2600000)
+    # LBA 86016..: 1 MiB trailing slack
     print(f"[+] Assembling full partitioned disk image: {out_ramdisk}...")
     with open(out_ramdisk, 'wb') as f_out:
         f_out.write(mbr)
@@ -179,6 +187,9 @@ def build_ramdisk():
         with open(temp_part, 'rb') as f_in:
             while chunk := f_in.read(1024 * 1024):
                 f_out.write(chunk)
+        # Verify and write root.apfs at exactly 38 MiB (0x2600000)
+        assert f_out.tell() == 38 * 1024 * 1024, f"Unexpected disk position before APFS: {f_out.tell()}"
+        f_out.write(root_apfs_data)
         f_out.write(b"\x00" * (2048 * 512))  # 1 MiB trailing slack (guarantees EndingLBA < LastLBA)
 
     if os.path.exists(temp_part):
@@ -211,6 +222,13 @@ def build_ramdisk():
         assert hashlib.sha256(fs.readbytes("/EFI/UniXNU/Payloads/KERNEL.adt")).hexdigest() == hashlib.sha256(adt_data).hexdigest()
         assert hashlib.sha256(fs.readbytes("/EFI/UniXNU/Payloads/air.dtb")).hexdigest() == hashlib.sha256(dtb_data).hexdigest()
         assert hashlib.sha256(fs.readbytes("/EFI/UniXNU/Payloads/root.apfs")).hexdigest() == hashlib.sha256(root_apfs_data).hexdigest()
+
+    # Verify Partition 2: Raw Apple APFS container at 38 MiB (0x2600000)
+    with open(out_ramdisk, 'rb') as f:
+        f.seek(38 * 1024 * 1024)
+        raw_apfs = f.read(len(root_apfs_data))
+        assert hashlib.sha256(raw_apfs).hexdigest() == hashlib.sha256(root_apfs_data).hexdigest()
+    print(f"[+] 100% VERIFIED Partition 2 Raw APFS container at 38 MiB (0x2600000, RAM physical 0x69500000)")
 
     print(f"[+] 100% VERIFIED MBR DISK: {out_ramdisk} ({total_disk_bytes} bytes)")
     print(f"[+] SHA256: {hashlib.sha256(open(out_ramdisk, 'rb').read()).hexdigest()}")

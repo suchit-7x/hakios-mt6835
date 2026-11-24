@@ -133,8 +133,10 @@ def main():
         adt_data = bytearray(f.read())
     assert len(adt_data) == 14048, f"Unexpected ADT length: {len(adt_data)}"
 
-    # Pre-populate RAMDisk size with 4 MiB (0x400000) at offset 0x298c in embedded ADT
+    # Pre-populate RAMDisk (phys_base=0x69500000, size=4 MiB) at offset 0x2984 in embedded ADT
+    struct.pack_into('<Q', adt_data, 0x2984, 0x69500000)
     struct.pack_into('<Q', adt_data, 0x298c, 0x400000)
+    print(f"[+] Embedded RAMDisk in ADT: phys_base=0x69500000, size=0x400000 (4 MiB)")
 
     data[0xb20000 : 0xb20000 + len(adt_data)] = adt_data
     print(f"[+] Embedded KERNEL.adt ({len(adt_data)} bytes) at file offset 0xb20000 (KVA 0xfffffff007f9c000)")
@@ -150,46 +152,14 @@ def main():
         subs x9, x9, #8
         b.hi 1b
 
-        /* 1. Retrieve DarwinBoot RAMDisk from old deviceTreeP at [x20, #0x60] */
-        ldr x7, [x20, #0x60]        /* Bootloader deviceTreeP (physical address) */
-        cbz x7, 2f
+        /* Ensure boot_args->memSize is at least 2 GB (0x80000000) so physical */
+        /* aperture covers RAMDisk at 0x69500000 (1.64 GB) without phystokv panics */
         mov x8, #0x0000
-        movk x8, #0x4000, lsl #16   /* DRAM base threshold 0x40000000 */
-        cmp x7, x8
-        b.lo 2f
-        mov x8, #0x2984             /* Exact offset of RAMDisk in KERNEL.adt */
-        ldr x12, [x7, x8]           /* phys_base */
-        add x8, x8, #8
-        ldr x13, [x7, x8]           /* size */
-        cbz x13, 2f
-        mov x8, #0x0000
-        movk x8, #0x0400, lsl #16   /* 64 MiB limit */
-        cmp x13, x8
-        b.ls 3f
-    2:
-        /* Fallback: Embedded root.apfs at gPhysBase + 0x1000000 (16 MiB) */
-        mov x12, #0x0000
-        movk x12, #0x0100, lsl #16  /* 0x1000000 = 16 MiB offset */
-        add x12, x12, x23           /* x12 = gPhysBase + 0x1000000 */
-        mov x13, #0x0000
-        movk x13, #0x0040, lsl #16  /* x13 = 0x400000 = 4 MiB */
-    3:
-        /* Store RAMDisk (phys_base, size) into embedded ADT in KVA (0xfffffff007f9c000 + 0x2984) */
-        mov x8, #0xc000
-        movk x8, #0x07f9, lsl #16
-        movk x8, #0xfff0, lsl #32
-        movk x8, #0xffff, lsl #48
-        mov x9, #0x2984
-        add x8, x8, x9
-        stp x12, x13, [x8]
-
-        /* Also store into embedded ADT in physical DRAM (x23 + 0xf98000 + 0x2984) */
-        mov x8, #0x8000
-        movk x8, #0x00f9, lsl #16   /* 0xf98000 */
-        add x8, x8, x23             /* physical base of embedded ADT */
-        mov x9, #0x2984
-        add x8, x8, x9
-        stp x12, x13, [x8]
+        movk x8, #0x8000, lsl #16   /* 0x80000000 = 2 GB */
+        ldr x9, [x20, #0x18]
+        cmp x9, x8
+        csel x8, x8, x9, lo
+        str x8, [x20, #0x18]
 
         /* Inject embedded KERNEL.adt into boot_args at x20 */
         /* Exact KVA 0xfffffff007f9c000 */
@@ -202,11 +172,12 @@ def main():
         mov w8, #0x36e0
         str w8, [x20, #0x68]
 
-        /* Ensure topOfKernelData is at least gPhysBase + 0x1400000 (20 MiB) */
+        /* Ensure topOfKernelData is at least gPhysBase + 0x4900000 (73 MiB) */
+        ldr x14, [x20, #0x10]       /* x14 = gPhysBase (0x40000000) */
         ldr x8, [x20, #0x20]
         mov x9, #0x0000
-        movk x9, #0x0140, lsl #16   /* 0x1400000 = 20 MiB */
-        add x9, x9, x23             /* gPhysBase + 20 MiB */
+        movk x9, #0x0490, lsl #16   /* 0x4900000 = 73 MiB */
+        add x9, x9, x14             /* gPhysBase + 73 MiB */
         cmp x8, x9
         csel x8, x9, x8, lo
         str x8, [x20, #0x20]
@@ -1166,16 +1137,47 @@ def main():
     data[0x44b870 : 0x44b870 + len(patch14_bytes)] = patch14_bytes
     print("[+] Patched ml_wait_max_cpus at 0x44b870 to unblock startup thread & advance to bsd_init")
 
-    # 15. Embed root.apfs fallback at file offset 0x1000000 (16 MiB, KVA 0xfffffff008004000)
-    root_apfs_path = '/home/suchit-7x/hackios/out/root.apfs'
-    with open(root_apfs_path, 'rb') as f:
-        root_apfs_data = f.read()
-    assert len(root_apfs_data) == 4194304, f"Unexpected root.apfs size: {len(root_apfs_data)}"
+    # 15. Patch _current_percpu_base and _current_processor to safely handle early boot (TPIDR_EL1 == NULL/invalid)
+    # 15a. _current_percpu_base at 0xfffffff00743e750 (file offset 0x43a750, 24 bytes)
+    patch_percpu_bytes = assemble('''
+        mrs x8, TPIDR_EL1
+        mov x0, #0
+        tbz x8, #63, 1f
+        ldr x0, [x8, #0x1c0]
+    1:  ret
+        nop
+    ''')
+    orig_percpu_bytes = bytes.fromhex("fd7bbfa9fd0300913f46009400e040f9fd7bc1a8c0035fd6")
+    assert data[0x43a750 : 0x43a750 + len(orig_percpu_bytes)] == orig_percpu_bytes, f"Unexpected at 0x43a750: {data[0x43a750:0x43a750+len(orig_percpu_bytes)].hex()}"
+    assert len(patch_percpu_bytes) == len(orig_percpu_bytes)
+    data[0x43a750 : 0x43a750 + len(patch_percpu_bytes)] = patch_percpu_bytes
+    print("[+] Patched _current_percpu_base at 0x43a750 to safely handle early-boot / null TPIDR_EL1")
 
-    if len(data) < 0x1000000:
-        data.extend(b'\x00' * (0x1000000 - len(data)))
-    data[0x1000000 : 0x1000000 + len(root_apfs_data)] = root_apfs_data
-    print(f"[+] Embedded root.apfs fallback ({len(root_apfs_data)} bytes) at file offset 0x1000000")
+    # 15b. _current_processor at 0xfffffff00743e768 (file offset 0x43a768, 36 bytes)
+    patch_processor_bytes = assemble('''
+        mrs x8, TPIDR_EL1
+        mov x0, #0
+        tbz x8, #63, 1f
+        ldr x0, [x8, #0x1c0]
+    1:  adrp x9, 0xfffffff007ad8000
+        add x9, x9, #0x180
+        add x0, x0, x9
+        ret
+        nop
+    ''')
+    orig_processor_bytes = bytes.fromhex("fd7bbfa9fd0300913946009408e040f9c93400d0290106910001098bfd7bc1a8c0035fd6")
+    assert data[0x43a768 : 0x43a768 + len(orig_processor_bytes)] == orig_processor_bytes, f"Unexpected at 0x43a768: {data[0x43a768:0x43a768+len(orig_processor_bytes)].hex()}"
+    assert len(patch_processor_bytes) == len(orig_processor_bytes)
+    data[0x43a768 : 0x43a768 + len(patch_processor_bytes)] = patch_processor_bytes
+    print("[+] Patched _current_processor at 0x43a768 to safely handle early-boot / null TPIDR_EL1")
+
+    # 16. Protect el1_sp0_synchronous_vector_long from double-faulting on TPIDR_EL1 == 0 (CHECK_KERNEL_STACK):
+    # At 0xfffffff007448028, change 'b.ne 0xfffffff0074480b0' (54000441) to unconditional 'b 0xfffffff0074480b0'.
+    # This bypasses the thread stack check in early boot and directly dispatches to fleh_synchronous.
+    orig_vec_bytes = bytes.fromhex("41040054") # b.ne 0xfffffff0074480b0
+    assert data[0x444028 : 0x44402c] == orig_vec_bytes, f"Unexpected at 0x444028: {data[0x444028:0x44402c].hex()}"
+    data[0x444028 : 0x44402c] = calc_b(0xfffffff007448028, 0xfffffff0074480b0)
+    print("[+] Patched el1_sp0_synchronous_vector_long at 0x444028 to bypass early CHECK_KERNEL_STACK double-fault")
 
     with open(kernel_out, 'wb') as f:
         f.write(data)
