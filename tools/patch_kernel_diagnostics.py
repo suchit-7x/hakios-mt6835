@@ -130,8 +130,12 @@ def main():
     # 5. Exit start.s (CYAN bar + ADT injection) at 0x41A4B4D0 (offset 0x4474d0) and branch from 0x41A4E4A8 (offset 0x44a4a8)
     adt_path = '/home/suchit-7x/hackios/out/KERNEL.adt'
     with open(adt_path, 'rb') as f:
-        adt_data = f.read()
+        adt_data = bytearray(f.read())
     assert len(adt_data) == 14048, f"Unexpected ADT length: {len(adt_data)}"
+
+    # Pre-populate RAMDisk size with 4 MiB (0x400000) at offset 0x298c in embedded ADT
+    struct.pack_into('<Q', adt_data, 0x298c, 0x400000)
+
     data[0xb20000 : 0xb20000 + len(adt_data)] = adt_data
     print(f"[+] Embedded KERNEL.adt ({len(adt_data)} bytes) at file offset 0xb20000 (KVA 0xfffffff007f9c000)")
 
@@ -146,6 +150,47 @@ def main():
         subs x9, x9, #8
         b.hi 1b
 
+        /* 1. Retrieve DarwinBoot RAMDisk from old deviceTreeP at [x20, #0x60] */
+        ldr x7, [x20, #0x60]        /* Bootloader deviceTreeP (physical address) */
+        cbz x7, 2f
+        mov x8, #0x0000
+        movk x8, #0x4000, lsl #16   /* DRAM base threshold 0x40000000 */
+        cmp x7, x8
+        b.lo 2f
+        mov x8, #0x2984             /* Exact offset of RAMDisk in KERNEL.adt */
+        ldr x12, [x7, x8]           /* phys_base */
+        add x8, x8, #8
+        ldr x13, [x7, x8]           /* size */
+        cbz x13, 2f
+        mov x8, #0x0000
+        movk x8, #0x0400, lsl #16   /* 64 MiB limit */
+        cmp x13, x8
+        b.ls 3f
+    2:
+        /* Fallback: Embedded root.apfs at gPhysBase + 0x1000000 (16 MiB) */
+        mov x12, #0x0000
+        movk x12, #0x0100, lsl #16  /* 0x1000000 = 16 MiB offset */
+        add x12, x12, x23           /* x12 = gPhysBase + 0x1000000 */
+        mov x13, #0x0000
+        movk x13, #0x0040, lsl #16  /* x13 = 0x400000 = 4 MiB */
+    3:
+        /* Store RAMDisk (phys_base, size) into embedded ADT in KVA (0xfffffff007f9c000 + 0x2984) */
+        mov x8, #0xc000
+        movk x8, #0x07f9, lsl #16
+        movk x8, #0xfff0, lsl #32
+        movk x8, #0xffff, lsl #48
+        mov x9, #0x2984
+        add x8, x8, x9
+        stp x12, x13, [x8]
+
+        /* Also store into embedded ADT in physical DRAM (x23 + 0xf98000 + 0x2984) */
+        mov x8, #0x8000
+        movk x8, #0x00f9, lsl #16   /* 0xf98000 */
+        add x8, x8, x23             /* physical base of embedded ADT */
+        mov x9, #0x2984
+        add x8, x8, x9
+        stp x12, x13, [x8]
+
         /* Inject embedded KERNEL.adt into boot_args at x20 */
         /* Exact KVA 0xfffffff007f9c000 */
         mov x8, #0xc000
@@ -156,6 +201,15 @@ def main():
 
         mov w8, #0x36e0
         str w8, [x20, #0x68]
+
+        /* Ensure topOfKernelData is at least gPhysBase + 0x1400000 (20 MiB) */
+        ldr x8, [x20, #0x20]
+        mov x9, #0x0000
+        movk x9, #0x0140, lsl #16   /* 0x1400000 = 20 MiB */
+        add x9, x9, x23             /* gPhysBase + 20 MiB */
+        cmp x8, x9
+        csel x8, x9, x8, lo
+        str x8, [x20, #0x20]
 
         /* Force boot_args->Video.v_display = 0 (Text Mode) and clean geometry */
         str xzr, [x20, #0x30]
@@ -1093,6 +1147,35 @@ def main():
     assert data[0x9cac38 : 0x9cac3c] == bytes.fromhex("680500b4"), f"Unexpected at 0x9cac38: {data[0x9cac38:0x9cac3c].hex()}"
     data[0x9cac38 : 0x9cac3c] = bytes.fromhex("1f2003d5") # nop
     print("[+] Patched IOPlatformExpert assert (gIOOptionsEntry != NULL) at 0x9cac38 -> nop")
+
+    # 14. Unblock ml_wait_max_cpus so kernel startup thread proceeds to bsd_init()
+    # Location: 0xfffffff00744f870 (file offset 0x44b870)
+    # Original: f657bda9f44f01a9fd7b02a9fd830091e83600b0088148b908040034e03600b0
+    # Patch:
+    #   mov w8, #1
+    #   adrp x9, 0xfffffff007d22000
+    #   str w8, [x9, #0x4dc]          ; max_cpus_initialized = 1 (MAX_CPUS_SET)
+    #   adrp x8, 0xfffffff007ae0000
+    #   ldr w0, [x8, #0x440]          ; load machine_info.max_cpus
+    #   cbnz w0, #0xfffffff00744f88c  ; if non-zero, return it
+    #   mov w0, #8                    ; default to 8 CPUs
+    #   ret
+    patch14_bytes = bytes.fromhex("28008052894600f028dd04b9883400b0004144b94000003500018052c0035fd6")
+    orig14_bytes = bytes.fromhex("f657bda9f44f01a9fd7b02a9fd830091e83600b0088148b908040034e03600b0")
+    assert data[0x44b870 : 0x44b870 + len(orig14_bytes)] == orig14_bytes, f"Unexpected at 0x44b870: {data[0x44b870:0x44b870+len(orig14_bytes)].hex()}"
+    data[0x44b870 : 0x44b870 + len(patch14_bytes)] = patch14_bytes
+    print("[+] Patched ml_wait_max_cpus at 0x44b870 to unblock startup thread & advance to bsd_init")
+
+    # 15. Embed root.apfs fallback at file offset 0x1000000 (16 MiB, KVA 0xfffffff008004000)
+    root_apfs_path = '/home/suchit-7x/hackios/out/root.apfs'
+    with open(root_apfs_path, 'rb') as f:
+        root_apfs_data = f.read()
+    assert len(root_apfs_data) == 4194304, f"Unexpected root.apfs size: {len(root_apfs_data)}"
+
+    if len(data) < 0x1000000:
+        data.extend(b'\x00' * (0x1000000 - len(data)))
+    data[0x1000000 : 0x1000000 + len(root_apfs_data)] = root_apfs_data
+    print(f"[+] Embedded root.apfs fallback ({len(root_apfs_data)} bytes) at file offset 0x1000000")
 
     with open(kernel_out, 'wb') as f:
         f.write(data)
