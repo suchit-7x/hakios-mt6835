@@ -9,6 +9,21 @@ def assemble(code):
     with open('/tmp/asm_probe.bin', 'rb') as f:
         return f.read()
 
+def assemble_with_symbols(code):
+    with open('/tmp/asm_sym.s', 'w') as f:
+        f.write('.text\n' + code + '\n')
+    subprocess.check_call(['aarch64-linux-gnu-as', '/tmp/asm_sym.s', '-o', '/tmp/asm_sym.o'])
+    subprocess.check_output(['aarch64-linux-gnu-objcopy', '-O', 'binary', '/tmp/asm_sym.o', '/tmp/asm_sym.bin'])
+    with open('/tmp/asm_sym.bin', 'rb') as f:
+        bin_data = bytearray(f.read())
+    nm_out = subprocess.check_output(['aarch64-linux-gnu-nm', '-t', 'd', '/tmp/asm_sym.o']).decode()
+    symbols = {}
+    for line in nm_out.strip().splitlines():
+        parts = line.split()
+        if len(parts) == 3:
+            symbols[parts[2]] = int(parts[0])
+    return bin_data, symbols
+
 def calc_b(src, dst):
     diff = dst - src
     imm26 = (diff >> 2) & 0x03ffffff
@@ -152,15 +167,27 @@ def main():
         subs x9, x9, #8
         b.hi 1b
 
-        /* Ensure boot_args->memSize is at least 2 GB (0x80000000) so physical */
-        /* aperture covers RAMDisk at 0x69500000 (1.64 GB) without phystokv panics */
+        /* 1. Retrieve DarwinBoot RAMDisk from old deviceTreeP at [x20, #0x60] */
+        ldr x7, [x20, #0x60]        /* Bootloader deviceTreeP (physical address) */
+        cbz x7, 2f
         mov x8, #0x0000
-        movk x8, #0x8000, lsl #16   /* 0x80000000 = 2 GB */
-        ldr x9, [x20, #0x18]
-        cmp x9, x8
-        csel x8, x8, x9, lo
-        str x8, [x20, #0x18]
-
+        movk x8, #0x4000, lsl #16   /* DRAM base threshold 0x40000000 */
+        cmp x7, x8
+        b.lo 2f
+        mov x8, #0x2984             /* Exact offset of RAMDisk in KERNEL.adt */
+        ldr x12, [x7, x8]           /* phys_base from DarwinBoot */
+        add x8, x8, #8
+        ldr x13, [x7, x8]           /* size from DarwinBoot */
+        cbz x13, 2f
+        /* Store dynamic RAMDisk (phys_base, size) into embedded ADT in KVA (0xfffffff007f9c000 + 0x2984) */
+        mov x8, #0xc000
+        movk x8, #0x07f9, lsl #16
+        movk x8, #0xfff0, lsl #32
+        movk x8, #0xffff, lsl #48
+        mov x9, #0x2984
+        add x8, x8, x9
+        stp x12, x13, [x8]
+    2:
         /* Inject embedded KERNEL.adt into boot_args at x20 */
         /* Exact KVA 0xfffffff007f9c000 */
         mov x8, #0xc000
@@ -171,16 +198,6 @@ def main():
 
         mov w8, #0x36e0
         str w8, [x20, #0x68]
-
-        /* Ensure topOfKernelData is at least gPhysBase + 0x4900000 (73 MiB) */
-        ldr x14, [x20, #0x10]       /* x14 = gPhysBase (0x40000000) */
-        ldr x8, [x20, #0x20]
-        mov x9, #0x0000
-        movk x9, #0x0490, lsl #16   /* 0x4900000 = 73 MiB */
-        add x9, x9, x14             /* gPhysBase + 73 MiB */
-        cmp x8, x9
-        csel x8, x9, x8, lo
-        str x8, [x20, #0x20]
 
         /* Force boot_args->Video.v_display = 0 (Text Mode) and clean geometry */
         str xzr, [x20, #0x30]
@@ -211,26 +228,23 @@ def main():
     print("[+] Injected CYAN probe + ADT injection at 0x4474d0 and hooked start.s exit at 0x44a4a8")
 
     # Injected arm_init diagnostic probes in the NOP region:
-    # 5a. Probe 2: arm_init entry (RED bar at 0xff26f000) at file offset 0x447540
+    # 5a. Probe 2: arm_init entry boot_args memory clamp at file offset 0x447590
     probe2_body = assemble('''
-        mov x11, #0xf000
-        movk x11, #0xff26, lsl #16
-        mov w10, #0x0000
-        movk w10, #0xffff, lsl #16
-        mov x9, #0x5c00
-    1:  stp w10, w10, [x11], #8
-        subs x9, x9, #8
-        b.hi 1b
+        mov x8, #0x0000
+        movk x8, #0xb000, lsl #16
+        str x8, [x0, #24]         // boot_args->memSize = 0xb0000000 (2816 MB)
+        str x8, [x0, #728]        // boot_args->memSizeActual = 0xb0000000 (2816 MB)
         mov x19, x0
     ''')
-    b_back_probe2 = calc_b(0x447540 + len(probe2_body), 0x43c818)
+    b_back_probe2 = calc_b(0x447590 + len(probe2_body), 0x43c818)
     probe2 = probe2_body + b_back_probe2
-    assert len(probe2) == 40
-    data[0x447540 : 0x447540 + len(probe2)] = probe2
-    data[0x43c814 : 0x43c818] = calc_b(0x43c814, 0x447540)
-    print("[+] Injected RED probe at arm_init entry (0x447540, hooked 0x43c814)")
+    assert len(probe2) <= 48
+    probe2_full = probe2 + (b'\x1f\x20\x03\xd5' * ((48 - len(probe2)) // 4))
+    data[0x447590 : 0x447590 + 48] = probe2_full
+    data[0x43c814 : 0x43c818] = calc_b(0x43c814, 0x447590)
+    print("[+] Injected boot_args memSize=0xb0000000 clamp at arm_init entry (0x447590, hooked 0x43c814)")
 
-    # 5b. Probe 3: PE_init_platform (MAGENTA before at 0xff27f000, LIME after at 0xff28f000) at file offset 0x447580
+    # 5b. Probe 3: PE_init_platform (MAGENTA before at 0xff27f000, LIME after at 0xff28f000) at file offset 0x4475c0
     probe3_part1 = assemble('''
         stp x29, x30, [sp, #-16]!
         mov x11, #0xf000
@@ -242,7 +256,7 @@ def main():
         subs x9, x9, #8
         b.hi 1b
     ''')
-    bl_pe_init = calc_bl(0x447580 + len(probe3_part1), 0xa4ddf4)
+    bl_pe_init = calc_bl(0x4475c0 + len(probe3_part1), 0xa4ddf4)
     probe3_part2 = assemble('''
         mov x11, #0xf000
         movk x11, #0xff28, lsl #16
@@ -257,11 +271,11 @@ def main():
     ''')
     probe3 = probe3_part1 + bl_pe_init + probe3_part2
     assert len(probe3) == 80
-    data[0x447580 : 0x447580 + len(probe3)] = probe3
-    data[0x43ccd4 : 0x43ccd8] = calc_bl(0x43ccd4, 0x447580)
-    print("[+] Injected MAGENTA/LIME probe around PE_init_platform (0x447580, hooked 0x43ccd4)")
+    data[0x4475c0 : 0x4475c0 + len(probe3)] = probe3
+    data[0x43ccd4 : 0x43ccd8] = calc_bl(0x43ccd4, 0x4475c0)
+    print("[+] Injected MAGENTA/LIME probe around PE_init_platform (0x4475c0, hooked 0x43ccd4)")
 
-    # 5c. Probe 4: After /chosen lookup (BLUE bar at 0xff29f000) at file offset 0x447600
+    # 5c. Probe 4: After /chosen lookup (BLUE bar at 0xff29f000) at file offset 0x447610
     probe4_body = assemble('''
         mov x11, #0xf000
         movk x11, #0xff29, lsl #16
@@ -273,12 +287,12 @@ def main():
         b.hi 1b
         ldr x0, [sp, #56]
     ''')
-    b_back_probe4 = calc_b(0x447600 + len(probe4_body), 0x43cd38)
+    b_back_probe4 = calc_b(0x447610 + len(probe4_body), 0x43cd38)
     probe4 = probe4_body + b_back_probe4
     assert len(probe4) == 40
-    data[0x447600 : 0x447600 + len(probe4)] = probe4
-    data[0x43cd34 : 0x43cd38] = calc_b(0x43cd34, 0x447600)
-    print("[+] Injected BLUE probe after /chosen lookup (0x447600, hooked 0x43cd34)")
+    data[0x447610 : 0x447610 + len(probe4)] = probe4
+    data[0x43cd34 : 0x43cd38] = calc_b(0x43cd34, 0x447610)
+    print("[+] Injected BLUE probe after /chosen lookup (0x447610, hooked 0x43cd34)")
 
     # 5d. Probe 5: arm_vm_init (ORANGE bar at 0xff2af000) at file offset 0x447640
     probe5_part1 = assemble('''
@@ -303,7 +317,7 @@ def main():
     data[0x43cf38 : 0x43cf3c] = calc_bl(0x43cf38, 0x447640)
     print("[+] Injected ORANGE probe before arm_vm_init (0x447640, hooked 0x43cf38)")
 
-    # 5e. Probe 5b: Inside arm_vm_init before MMU alternate switch (PINK bar at 0xff2bf000) at file offset 0x447680
+    # 5e. Probe 5b: Inside arm_vm_init before MMU alternate switch (PINK bar at 0xff2bf000) at file offset 0x447670
     part1_alt = assemble('''
         stp x29, x30, [sp, #-16]!
         mov x11, #0xf000
@@ -315,18 +329,18 @@ def main():
         subs x9, x9, #8
         b.hi 1b
     ''')
-    bl_alt = calc_bl(0x447680 + len(part1_alt), 0x44ec54)
+    bl_alt = calc_bl(0x447670 + len(part1_alt), 0x44ec54)
     part2_alt = assemble('''
         ldp x29, x30, [sp], #16
     ''')
-    b_back_alt = calc_b(0x447680 + len(part1_alt) + 4 + len(part2_alt), 0x43f21c)
+    b_back_alt = calc_b(0x447670 + len(part1_alt) + 4 + len(part2_alt), 0x43f21c)
     probe5_alt = part1_alt + bl_alt + part2_alt + b_back_alt
     assert len(probe5_alt) <= 64
-    data[0x447680 : 0x447680 + len(probe5_alt)] = probe5_alt
-    data[0x43f218 : 0x43f21c] = calc_b(0x43f218, 0x447680)
-    print("[+] Injected PINK probe before set_mmu_ttb_alternate at 0x447680 (hooked 0x43f218)")
+    data[0x447670 : 0x447670 + len(probe5_alt)] = probe5_alt
+    data[0x43f218 : 0x43f21c] = calc_b(0x43f218, 0x447670)
+    print("[+] Injected PINK probe before set_mmu_ttb_alternate at 0x447670 (hooked 0x43f218)")
 
-    # 5f. Probe 5c: TTBR0 mapping persist + Cyan bar at 0xff2cf000 at file offset 0x4476c0
+    # 5f. Probe 5c: TTBR0 mapping persist + Cyan bar at 0xff2cf000 at file offset 0x4476b0
     part1_ttbr0 = assemble('''
         stp x29, x30, [sp, #-16]!
         ldr x10, [x19, #-8]
@@ -336,7 +350,7 @@ def main():
         ldr x8, [x19]
         and x0, x8, #0xffffffffffff
     ''')
-    bl_set_mmu = calc_bl(0x4476c0 + len(part1_ttbr0), 0x44ec64)
+    bl_set_mmu = calc_bl(0x4476b0 + len(part1_ttbr0), 0x44ec64)
     part2_ttbr0 = assemble('''
         tlbi vmalle1is
         dsb ish
@@ -351,15 +365,15 @@ def main():
         b.hi 1b
         ldp x29, x30, [sp], #16
     ''')
-    b_back_ttbr0 = calc_b(0x4476c0 + len(part1_ttbr0) + 4 + len(part2_ttbr0), 0x43f240)
+    b_back_ttbr0 = calc_b(0x4476b0 + len(part1_ttbr0) + 4 + len(part2_ttbr0), 0x43f240)
     probe_ttbr0 = part1_ttbr0 + bl_set_mmu + part2_ttbr0 + b_back_ttbr0
     assert len(probe_ttbr0) <= 96
-    data[0x4476c0 : 0x4476c0 + len(probe_ttbr0)] = probe_ttbr0
-    data[0x43f228 : 0x43f22c] = calc_b(0x43f228, 0x4476c0)
+    data[0x4476b0 : 0x4476b0 + len(probe_ttbr0)] = probe_ttbr0
+    data[0x43f228 : 0x43f22c] = calc_b(0x43f228, 0x4476b0)
     data[0x43f22c : 0x43f240] = bytes.fromhex('1f2003d5' * 5)
-    print("[+] Injected TTBR0 persistence + CYAN probe at 0x4476c0 (hooked 0x43f228)")
+    print("[+] Injected TTBR0 persistence + CYAN probe at 0x4476b0 (hooked 0x43f228)")
 
-    # 5g. Probe 6: Return from arm_vm_init (YELLOW bar at 0xff2df000) at file offset 0x447730
+    # 5g. Probe 6: Return from arm_vm_init (YELLOW bar at 0xff2df000) at file offset 0x447710
     body_vm_exit = assemble('''
         mov x11, #0xf000
         movk x11, #0xff2d, lsl #16
@@ -370,15 +384,15 @@ def main():
         subs x9, x9, #8
         b.hi 1b
     ''')
-    b_back_vm_exit = calc_b(0x447730 + len(body_vm_exit), 0x43cf44)
+    b_back_vm_exit = calc_b(0x447710 + len(body_vm_exit), 0x43cf44)
     probe_vm_exit = body_vm_exit + b_back_vm_exit
     assert len(probe_vm_exit) <= 48
-    data[0x447730 : 0x447730 + len(probe_vm_exit)] = probe_vm_exit
-    data[0x43cf3c : 0x43cf40] = calc_b(0x43cf3c, 0x447730)
+    data[0x447710 : 0x447710 + len(probe_vm_exit)] = probe_vm_exit
+    data[0x43cf3c : 0x43cf40] = calc_b(0x43cf3c, 0x447710)
     data[0x43cf40 : 0x43cf44] = bytes.fromhex('1f2003d5')
-    print("[+] Injected YELLOW probe at arm_vm_init return at 0x447730 (hooked 0x43cf3c)")
+    print("[+] Injected YELLOW probe at arm_vm_init return at 0x447710 (hooked 0x43cf3c)")
 
-    # 5h. Probe 7: After serial_init (WHITE bar at 0xff2ef000) at file offset 0x447770
+    # 5h. Probe 7: After serial_init (WHITE bar at 0xff2ef000) at file offset 0x447740
     body_serial_exit = assemble('''
         mov x19, x0
         mov x11, #0xf000
@@ -390,15 +404,15 @@ def main():
         subs x9, x9, #8
         b.hi 1b
     ''')
-    b_back_serial_exit = calc_b(0x447770 + len(body_serial_exit), 0x43cf6c)
+    b_back_serial_exit = calc_b(0x447740 + len(body_serial_exit), 0x43cf6c)
     probe_serial_exit = body_serial_exit + b_back_serial_exit
     assert len(probe_serial_exit) <= 48
-    data[0x447770 : 0x447770 + len(probe_serial_exit)] = probe_serial_exit
-    data[0x43cf60 : 0x43cf64] = calc_b(0x43cf60, 0x447770)
+    data[0x447740 : 0x447740 + len(probe_serial_exit)] = probe_serial_exit
+    data[0x43cf60 : 0x43cf64] = calc_b(0x43cf60, 0x447740)
     data[0x43cf64 : 0x43cf6c] = bytes.fromhex('1f2003d5' * 2)
-    print("[+] Injected WHITE probe after serial_init at 0x447770 (hooked 0x43cf60)")
+    print("[+] Injected WHITE probe after serial_init at 0x447740 (hooked 0x43cf60)")
 
-    # 5i. Probe 8: Right before PE_create_console (PURPLE bar at 0xff2ff000) at file offset 0x4477b0
+    # 5i. Probe 8: Right before PE_create_console (PURPLE bar at 0xff2ff000) at file offset 0x447770
     body_before_console = assemble('''
         str wzr, [x8]
         mov x11, #0xf000
@@ -410,14 +424,14 @@ def main():
         subs x9, x9, #8
         b.hi 1b
     ''')
-    b_back_before_console = calc_b(0x4477b0 + len(body_before_console), 0x43d09c)
+    b_back_before_console = calc_b(0x447770 + len(body_before_console), 0x43d09c)
     probe_before_console = body_before_console + b_back_before_console
     assert len(probe_before_console) <= 48
-    data[0x4477b0 : 0x4477b0 + len(probe_before_console)] = probe_before_console
-    data[0x43d098 : 0x43d09c] = calc_b(0x43d098, 0x4477b0)
-    print("[+] Injected PURPLE probe before PE_create_console at 0x4477b0 (hooked 0x43d098)")
+    data[0x447770 : 0x447770 + len(probe_before_console)] = probe_before_console
+    data[0x43d098 : 0x43d09c] = calc_b(0x43d098, 0x447770)
+    print("[+] Injected PURPLE probe before PE_create_console at 0x447770 (hooked 0x43d098)")
 
-    # 5j. Probe 9: Right after PE_create_console (LIME bar at 0xff30f000) at file offset 0x4477f0
+    # 5j. Probe 9: Right after PE_create_console (LIME bar at 0xff30f000) at file offset 0x4477a0
     body_after_console = assemble('''
         mov x11, #0xf000
         movk x11, #0xff30, lsl #16
@@ -428,13 +442,13 @@ def main():
         subs x9, x9, #8
         b.hi 1b
     ''')
-    b_back_after_console = calc_b(0x4477f0 + len(body_after_console), 0x43d0a8)
+    b_back_after_console = calc_b(0x4477a0 + len(body_after_console), 0x43d0a8)
     probe_after_console = body_after_console + b_back_after_console
     assert len(probe_after_console) <= 48
-    data[0x4477f0 : 0x4477f0 + len(probe_after_console)] = probe_after_console
-    data[0x43d0a0 : 0x43d0a4] = calc_b(0x43d0a0, 0x4477f0)
+    data[0x4477a0 : 0x4477a0 + len(probe_after_console)] = probe_after_console
+    data[0x43d0a0 : 0x43d0a4] = calc_b(0x43d0a0, 0x4477a0)
     data[0x43d0a4 : 0x43d0a8] = bytes.fromhex('1f2003d5')
-    print("[+] Injected LIME probe after PE_create_console at 0x4477f0 (hooked 0x43d0a0)")
+    print("[+] Injected LIME probe after PE_create_console at 0x4477a0 (hooked 0x43d0a0)")
 
     # 5k. Probe 10: Early Panic on-screen text logger at file offset 0x447830
     panic_logger_code = '''
@@ -480,14 +494,6 @@ def main():
         madd x20, x1, x23, x22
         add x20, x20, #200
 
-        // Check if called from __assert (0xfffffff007a78c2c)
-        mov x8, #0x8c2c
-        movk x8, #0x07a7, lsl #16
-        movk x8, #0xfff0, lsl #32
-        movk x8, #0xffff, lsl #48
-        cmp x14, x8
-        b.eq is_assert
-
         // Check if called from panic_with_arm_saved_state (0xfffffff007a82f98)
         mov x8, #0x2f98
         movk x8, #0x07a8, lsl #16
@@ -508,6 +514,40 @@ def main():
         mov x1, x19
         bl draw_string
         bl advance_line
+
+        // Variadic stack arguments:
+        // [x21, #0] = arg 0 (path pointer or value)
+        adr x1, str_arg0
+        ldr x2, [x21, #0]
+        bl draw_line_hex
+
+        // If arg 0 is a valid pointer, also draw as string
+        ldr x1, [x21, #0]
+        lsr x8, x1, #48
+        mov w9, #0xffff
+        cmp w8, w9
+        b.ne 1f
+        adr x1, str_str0
+        mov x0, x20
+        bl draw_string
+        ldr x1, [x21, #0]
+        bl draw_string
+        bl advance_line
+    1:
+        // [x21, #8] = arg 1 (errno)
+        adr x1, str_arg1
+        ldr x2, [x21, #8]
+        bl draw_line_hex
+
+        // [x21, #16] = arg 2 (source file)
+        adr x1, str_arg2
+        ldr x2, [x21, #16]
+        bl draw_line_hex
+
+        // [x21, #24] = arg 3 (line number)
+        adr x1, str_arg3
+        ldr x2, [x21, #24]
+        bl draw_line_hex
         b hang
 
     is_saved_state:
@@ -569,33 +609,6 @@ def main():
         adr x1, str_null
         bl draw_line_str
         b hang
-
-    is_assert:
-        ldr x25, [x21, #16]   // expr
-        ldr x26, [x21, #0]    // file
-        ldr x27, [x21, #8]    // line
-        ldr x28, [x21, #40]   // caller lr
-
-        adr x1, str_assert_title
-        bl draw_line_str
-        adr x1, str_caller
-        mov x2, x28
-        bl draw_line_hex
-        adr x1, str_file
-        mov x0, x20
-        bl draw_string
-        mov x1, x26
-        bl draw_string
-        bl advance_line
-        adr x1, str_line
-        mov x2, x27
-        bl draw_line_hex
-        adr x1, str_expr
-        mov x0, x20
-        bl draw_string
-        mov x1, x25
-        bl draw_string
-        bl advance_line
 
     hang:
         wfe
@@ -713,13 +726,14 @@ def main():
         ret
 
     str_panic_title:  .asciz "*** PANIC ***"
-    str_assert_title: .asciz "*** ASSERT ***"
     str_exc_title:    .asciz "*** EXCEPTION PANIC ***"
     str_caller:       .asciz "CALLER: "
     str_msg:          .asciz "MSG: "
-    str_file:         .asciz "FILE: "
-    str_line:         .asciz "LINE: "
-    str_expr:         .asciz "EXPR: "
+    str_arg0:         .asciz "ARG0: "
+    str_str0:         .asciz "STR0: "
+    str_arg1:         .asciz "ERRNO: "
+    str_arg2:         .asciz "ARG2: "
+    str_arg3:         .asciz "ARG3: "
     str_reason:       .asciz "REASON: "
     str_state_ptr:    .asciz "STATE: "
     str_fpc:          .asciz "PC:  "
@@ -1019,7 +1033,7 @@ def main():
     p_dram_part2 = assemble('''
         str x8, [x9, #0x818]
         mov x8, #0x0000
-        movk x8, #0x0001, lsl #32
+        movk x8, #0xb000, lsl #16
         str x8, [x9, #0x820]
         mov x11, #0xf000
         movk x11, #0xff31, lsl #16
@@ -1045,6 +1059,11 @@ def main():
         c_new = c_val | 0xff000000
         data[c_off : c_off + 4] = struct.pack('<I', c_new)
     print("[+] Patched _vc_colors at 0x5228 to force alpha=0xFF for all 8 console colors")
+
+    # 9d. In _gc_enable: NOP disableConsoleOutput = 1 (offset 0x412b48) and gc_enabled = 0 (offset 0x412b50)
+    data[0x412b48 : 0x412b4c] = b'\x1f\x20\x03\xd5'
+    data[0x412b50 : 0x412b54] = b'\x1f\x20\x03\xd5'
+    print("[+] Patched _gc_enable at 0x412b48 and 0x412b50 to prevent disabling text console")
 
     # 10. Patch default init binary path from /sbin/launchd to /sbin/init
     launchd_str = b'/sbin/launchd\x00'
@@ -1153,31 +1172,495 @@ def main():
     data[0x43a750 : 0x43a750 + len(patch_percpu_bytes)] = patch_percpu_bytes
     print("[+] Patched _current_percpu_base at 0x43a750 to safely handle early-boot / null TPIDR_EL1")
 
-    # 15b. _current_processor at 0xfffffff00743e768 (file offset 0x43a768, 36 bytes)
-    patch_processor_bytes = assemble('''
+    # 15b. _current_processor at 0xfffffff00743a768 (file offset 0x43a768, 36 bytes)
+    patch_processor_bytes = bytearray(assemble('''
         mrs x8, TPIDR_EL1
         mov x0, #0
         tbz x8, #63, 1f
         ldr x0, [x8, #0x1c0]
-    1:  adrp x9, 0xfffffff007ad8000
+    1:  adrp x9, 0
         add x9, x9, #0x180
         add x0, x0, x9
         ret
         nop
-    ''')
+    '''))
+    # Correctly compute adrp to 0xfffffff007ad4000 (stock instruction is c93400d0)
+    patch_processor_bytes[16 : 20] = calc_adrp(0xfffffff00743a768 + 16, 0xfffffff007ad4000, 9)
+    assert patch_processor_bytes[16 : 20] == bytes.fromhex("c93400d0")
     orig_processor_bytes = bytes.fromhex("fd7bbfa9fd0300913946009408e040f9c93400d0290106910001098bfd7bc1a8c0035fd6")
     assert data[0x43a768 : 0x43a768 + len(orig_processor_bytes)] == orig_processor_bytes, f"Unexpected at 0x43a768: {data[0x43a768:0x43a768+len(orig_processor_bytes)].hex()}"
     assert len(patch_processor_bytes) == len(orig_processor_bytes)
     data[0x43a768 : 0x43a768 + len(patch_processor_bytes)] = patch_processor_bytes
-    print("[+] Patched _current_processor at 0x43a768 to safely handle early-boot / null TPIDR_EL1")
+    print("[+] Patched _current_processor at 0x43a768 (with verified adrp 0xfffffff007ad4000)")
 
     # 16. Protect el1_sp0_synchronous_vector_long from double-faulting on TPIDR_EL1 == 0 (CHECK_KERNEL_STACK):
-    # At 0xfffffff007448028, change 'b.ne 0xfffffff0074480b0' (54000441) to unconditional 'b 0xfffffff0074480b0'.
+    # At 0xfffffff007444028, change 'b.ne 0xfffffff0074440b0' (54000441) to unconditional 'b 0xfffffff0074440b0'.
     # This bypasses the thread stack check in early boot and directly dispatches to fleh_synchronous.
-    orig_vec_bytes = bytes.fromhex("41040054") # b.ne 0xfffffff0074480b0
+    orig_vec_bytes = bytes.fromhex("41040054") # b.ne 0xfffffff0074440b0
     assert data[0x444028 : 0x44402c] == orig_vec_bytes, f"Unexpected at 0x444028: {data[0x444028:0x44402c].hex()}"
-    data[0x444028 : 0x44402c] = calc_b(0xfffffff007448028, 0xfffffff0074480b0)
+    data[0x444028 : 0x44402c] = calc_b(0xfffffff007444028, 0xfffffff0074440b0)
     print("[+] Patched el1_sp0_synchronous_vector_long at 0x444028 to bypass early CHECK_KERNEL_STACK double-fault")
+
+    # 17. Patch mdevlookup at 0xfffffff0074ad994 (file offset 0x4a9994) with auto-creation fallback:
+    # If md0 has not been configured by /chosen/memory-map/RAMDisk, auto-create it using:
+    #   kva = ml_static_ptovirt(0x69500000)
+    #   mdevadd(0, kva >> 12, 0x400, 0)
+    # Location for helper: 0x447cd0
+    fb_code = '''
+        cbnz w0, 1f
+        stp x29, x30, [sp, #-16]!
+        mov x0, #0x0000
+        movk x0, #0x6950, lsl #16
+        bl 0
+        lsr x1, x0, #12
+        mov x0, #0
+        mov x2, #0x400
+        mov w3, #0
+        bl 0
+        ldp x29, x30, [sp], #16
+        ret
+    1:  mov w0, #0xffffffff
+        ret
+    '''
+    fb_bytes = bytearray(assemble(fb_code))
+    fb_addr = 0x447cd0
+    # First bl 0 at offset 16 -> target_ml_static_ptovirt (0x44db78)
+    bl1_offset = 16
+    fb_bytes[bl1_offset : bl1_offset + 4] = calc_bl(fb_addr + bl1_offset, 0x44db78)
+    # Second bl 0 at offset 36 -> target_mdevadd (0x4a96a0)
+    bl2_offset = 36
+    fb_bytes[bl2_offset : bl2_offset + 4] = calc_bl(fb_addr + bl2_offset, 0x4a96a0)
+    assert len(fb_bytes) == 56
+    data[fb_addr : fb_addr + len(fb_bytes)] = fb_bytes
+
+    # Hook mdevlookup at 0x4a9994: replace `mov w0, #0xffffffff` with branch to 0x447cd0
+    orig_mdev_inst = bytes.fromhex("00008012") # mov w0, #0xffffffff
+    assert data[0x4a9994 : 0x4a9998] == orig_mdev_inst, f"Unexpected at 0x4a9994: {data[0x4a9994:0x4a9998].hex()}"
+    data[0x4a9994 : 0x4a9998] = calc_b(0x4a9994, fb_addr)
+    print(f"[+] Injected mdevlookup auto-creation fallback at 0x{fb_addr:x} and hooked 0x4a9994")
+
+    # 18. Patch _arm64_platform_error at 0xfffffff0074499b8 (file offset 0x4459b8) to safely absorb platform errors:
+    orig_plat_bytes = bytes.fromhex("f44fbea9")
+    assert data[0x4459b8 : 0x4459bc] == orig_plat_bytes, f"Unexpected at 0x4459b8: {data[0x4459b8:0x4459bc].hex()}"
+    data[0x4459b8 : 0x4459bc] = bytes.fromhex("c0035fd6") # ret
+    print("[+] Patched _arm64_platform_error at 0x4459b8 with ret to absorb platform errors")
+
+    # 19. Patch _sleh_serror at 0xfffffff00744a6f0 (file offset 0x4466f0) to safely absorb asynchronous SErrors:
+    orig_sleh_bytes = bytes.fromhex("ff8301d1")
+    assert data[0x4466f0 : 0x4466f4] == orig_sleh_bytes, f"Unexpected at 0x4466f0: {data[0x4466f0:0x4466f4].hex()}"
+    data[0x4466f0 : 0x4466f4] = bytes.fromhex("c0035fd6") # ret
+    print("[+] Patched _sleh_serror at 0x4466f0 with ret to absorb SErrors")
+
+    # 20. Fix video_scroll_up and video_scroll_down 4x buffer overrun bug:
+    # At 0xfffffff007412fb4 (offset 0x40efb4), replace `lsl x2, x10, #2` with `mov x2, x10`
+    # At 0xfffffff007412fcc (offset 0x40efcc), replace `lsl x2, x9, #2` with `mov x2, x9`
+    orig_scroll_up = bytes.fromhex("42f57ed3")
+    assert data[0x40efb4 : 0x40efb8] == orig_scroll_up, f"Unexpected at 0x40efb4: {data[0x40efb4:0x40efb8].hex()}"
+    data[0x40efb4 : 0x40efb8] = bytes.fromhex("e2030aaa") # mov x2, x10
+
+    orig_scroll_down = bytes.fromhex("22f57ed3")
+    assert data[0x40efcc : 0x40efd0] == orig_scroll_down, f"Unexpected at 0x40efcc: {data[0x40efcc:0x40efd0].hex()}"
+    data[0x40efcc : 0x40efd0] = bytes.fromhex("e20309aa") # mov x2, x9
+    print("[+] Patched video_scroll_up and video_scroll_down to prevent 4x buffer overrun and scroll crashes")
+
+    # 21. Patch _PE_slide_devicetree at 0xfffffff007a51da8 (file offset 0xa4dda8) to return immediately:
+    # Since KERNEL.adt is embedded at a fixed static KVA in __BOOTDATA (0xfffffff007f9c000),
+    # sliding deviceTreeHead with physical aperture offsets corrupts the DT pointer and breaks IODeviceTreeAlloc!
+    orig_slide_bytes = bytes.fromhex("fd7bbfa9")
+    assert data[0xa4dda8 : 0xa4ddac] == orig_slide_bytes, f"Unexpected at 0xa4dda8: {data[0xa4dda8:0xa4ddac].hex()}"
+    data[0xa4dda8 : 0xa4ddac] = bytes.fromhex("c0035fd6") # ret
+    print("[+] Patched _PE_slide_devicetree at 0xa4dda8 with ret to keep embedded deviceTreeHead at 0xfffffff007f9c000")
+
+    # 22. Bypass waitForMatchingService hang in IOFindBSDRoot at 0xfffffff007a2a974 (file offset 0xa26974):
+    # Early timer interrupts do not wake up sleeping threads; waiting 100ms for IOBSD matching hangs forever.
+    # Replace `bl waitForMatchingService` (59a2fd97) with `mov x0, #0` (000080d2).
+    # Since x0 is NULL, IOFindBSDRoot prints '!BSD\n' and immediately proceeds to BSD root mounting (md0).
+    orig_wait_inst = bytes.fromhex("59a2fd97") # bl 0xfffffff0079932d8
+    assert data[0xa26974 : 0xa26978] == orig_wait_inst, f"Unexpected at 0xa26974: {data[0xa26974:0xa26978].hex()}"
+    data[0xa26974 : 0xa26978] = bytes.fromhex("000080d2") # mov x0, #0
+    print("[+] Patched IOFindBSDRoot at 0xa26974 with mov x0, #0 to bypass waitForMatchingService timeout hang")
+
+    # 23. Patch _redwood_mtk_ufs_init at 0xfffffff0074ced80 (file offset 0x4cad80) to auto-enable UFSHCI controller
+    # and verify/establish UniPro link:
+    # If Host Controller Enable (HCE, REG 0x34) is 0 at boot, write 1 to REG_HCE and wait for it to become 1.
+    # If link is already UP (HCS bit 0 DEVICE_PRESENT == 1), branch directly to target_continue.
+    # Otherwise issue UIC_CMD_DME_LINK_STARTUP (0x16) via REG_UICCMD (0x90) with UCCS (bit 10) / ULSS (bit 8) poll,
+    # verify ARG2 and DEVICE_PRESENT, clear UECPA, and log status with Apple ARM64 ABI stack-passed variadic arguments.
+    orig_hce_test = bytes.fromhex("f3000037") # tbnz w19, #0, 0xfffffff0074ced9c
+    assert data[0x4cad80 : 0x4cad84] == orig_hce_test, f"Unexpected at 0x4cad80: {data[0x4cad80:0x4cad84].hex()}"
+
+    hce_helper_code = r'''
+        // Load ufs_mmio
+        mov x8, #0x4010
+        movk x8, #0x07e9, lsl #16
+        movk x8, #0xfff0, lsl #32
+        movk x8, #0xffff, lsl #48
+        ldr x8, [x8]
+        cbz x8, fail_mmio_null
+
+        // Step 0: Check / Enable HCE
+        mov w14, #0
+        ldr w9, [x8, #0x34]
+        tbnz w9, #0, hce_on
+        mov w9, #1
+        str w9, [x8, #0x34]
+        dsb sy
+        mov x10, #0x100000
+    1:
+        ldr w9, [x8, #0x34]
+        tbnz w9, #0, hce_on
+        subs x10, x10, #1
+        b.ne 1b
+        b fail_early
+
+    hce_on:
+        // Disable Auto-Hibernate immediately
+        str wzr, [x8, #0x18]
+        dsb sy
+
+        mov w13, #2
+    link_startup_loop:
+        // Step 1: Wait for UCRDY (HCS bit 3)
+        mov w14, #1
+        mov x10, #0x100000
+    wait_ucrdy:
+        ldr w9, [x8, #0x30]
+        tbnz w9, #3, ucrdy_ok
+        subs x10, x10, #1
+        b.ne wait_ucrdy
+        b link_retry_or_fail
+
+    ucrdy_ok:
+        // Clear IS and error registers
+        mvn w9, wzr
+        str w9, [x8, #0x20]
+        ldr w9, [x8, #0x38]
+        ldr w9, [x8, #0x3c]
+
+        str wzr, [x8, #0x94]
+        str wzr, [x8, #0x98]
+        str wzr, [x8, #0x9c]
+        dsb sy
+
+        // Issue DME_LINK_STARTUP (0x16)
+        mov w9, #0x16
+        str w9, [x8, #0x90]
+        dsb sy
+
+        // Step 2: Wait for UCCS (bit 10) or ULSS (bit 8)
+        mov w14, #2
+        mov x10, #0x200000
+    wait_uccs:
+        ldr w9, [x8, #0x20]
+        tbnz w9, #10, uccs_ok
+        tbnz w9, #8, uccs_ok
+        subs x10, x10, #1
+        b.ne wait_uccs
+        b link_retry_or_fail
+
+    uccs_ok:
+        // Clear UECPA once due to LINERESET during LINK_STARTUP (Linux ufshcd.c line 4825)
+        ldr w9, [x8, #0x38]
+
+        // Clear IS
+        mvn w9, wzr
+        str w9, [x8, #0x20]
+        dsb sy
+
+        // Step 3: Check DEVICE_PRESENT (HCS bit 0)
+        ldr w10, [x8, #0x30]
+        tbnz w10, #0, link_startup_ok
+        mov w14, #3
+        b link_retry_or_fail
+
+    link_startup_ok:
+        subs w13, w13, #1
+        b.ne link_startup_loop
+
+        // Success print (Apple ARM64 ABI: stack-passed variadic arguments)
+        ldr w1, [x8, #0x98]
+        and w1, w1, #0xff
+        ldr w2, [x8, #0x30]
+        sub sp, sp, #32
+        stp x29, x30, [sp, #16]
+        str x1, [sp]
+        str x2, [sp, #8]
+        adr x0, str_success
+    _bl_success:
+        bl 0
+        ldp x29, x30, [sp, #16]
+        add sp, sp, #32
+    _b_continue:
+        b 0
+
+    link_retry_or_fail:
+        subs w13, w13, #1
+        b.gt link_startup_loop
+
+    fail_early:
+        ldr w1, [x8, #0x98]
+        sub sp, sp, #32
+        stp x29, x30, [sp, #16]
+        str x14, [sp]
+        str x1, [sp, #8]
+        adr x0, str_fail
+    _bl_fail:
+        bl 0
+        ldp x29, x30, [sp, #16]
+        add sp, sp, #32
+    _b_fail:
+        b 0
+
+    fail_mmio_null:
+        sub sp, sp, #16
+        stp x29, x30, [sp]
+        adr x0, str_fail_null
+    _bl_fail_null:
+        bl 0
+        ldp x29, x30, [sp], #16
+    _b_fail_null:
+        b 0
+
+    str_success:
+        .asciz "ufs_mtk: link startup OK (arg2=0x%02x, hcs=0x%08x)\n"
+        .align 2
+    str_fail:
+        .asciz "ufs_mtk: link startup FAILED step=%d (arg2=0x%02x)\n"
+        .align 2
+    str_fail_null:
+        .asciz "ufs_mtk: link startup FAILED (NULL mmio)\n"
+        .align 2
+    '''
+    hce_bytes, syms = assemble_with_symbols(hce_helper_code)
+    hce_addr = 0x447d10
+    printf_addr = 0x2ddbc0
+    target_continue = 0x4cad9c
+    target_fail = 0x4cee48  # clean function exit, bypasses misleading "host controller not enabled" print
+
+    hce_bytes[syms['_bl_success'] : syms['_bl_success'] + 4] = calc_bl(hce_addr + syms['_bl_success'], printf_addr)
+    hce_bytes[syms['_bl_fail'] : syms['_bl_fail'] + 4] = calc_bl(hce_addr + syms['_bl_fail'], printf_addr)
+    hce_bytes[syms['_bl_fail_null'] : syms['_bl_fail_null'] + 4] = calc_bl(hce_addr + syms['_bl_fail_null'], printf_addr)
+    hce_bytes[syms['_b_continue'] : syms['_b_continue'] + 4] = calc_b(hce_addr + syms['_b_continue'], target_continue)
+    hce_bytes[syms['_b_fail'] : syms['_b_fail'] + 4] = calc_b(hce_addr + syms['_b_fail'], target_fail)
+    hce_bytes[syms['_b_fail_null'] : syms['_b_fail_null'] + 4] = calc_b(hce_addr + syms['_b_fail_null'], target_fail)
+
+    assert len(hce_bytes) <= 752
+    data[hce_addr : hce_addr + len(hce_bytes)] = hce_bytes
+    data[0x4cad80 : 0x4cad84] = calc_b(0x4cad80, hce_addr)
+    print(f"[+] Injected UFSHCI auto-enable + DME_LINK_STARTUP hook at 0x4cad80 -> helper at 0x{hce_addr:x} ({len(hce_bytes)} bytes)")
+
+    # 24. Fix UPIU_FLAG_READ in _mtk_ufs_read_hw at 0xfffffff0074cf1c0 (file offset 0x4cb1c0):
+    # Stock binary had `mov w8, #8193` (0x2001, opcode 28008452), setting UPIU Command Flags = 0x20 (UPIU_FLAG_WRITE).
+    # This caused UFSHCI OCS = 0x05 (OCS_PEER_COMM_FAILURE) because the SCSI command is READ(10) (0x28) and
+    # UTRD Data Direction is IN (0x14000000).
+    # Patch to `mov w8, #16385` (0x4001, opcode 28008852) to set UPIU_FLAG_READ = 0x40.
+    orig_upiu_flag = bytes.fromhex("28008452")
+    assert data[0x4cb1c0 : 0x4cb1c4] == orig_upiu_flag, f"Unexpected at 0x4cb1c0: {data[0x4cb1c0:0x4cb1c4].hex()}"
+    data[0x4cb1c0 : 0x4cb1c4] = bytes.fromhex("28008852")
+    print("[+] Patched UPIU_FLAG_READ at 0x4cb1c0: 0x2001 -> 0x4001 (UPIU_FLAG_READ = 0x40)")
+
+    # 25. Patch _mtk_ufs_read_hw:
+    # 25a. Wait for HCS.UTRLRDY before ringing Doorbell:
+    # At 0x4cb288 (VA 0xfffffff0074cf288): replace `b.eq #0x4cb31c` with `b.eq #0x4cb318`
+    orig_beq = bytes.fromhex("a0040054")
+    assert data[0x4cb288 : 0x4cb28c] == orig_beq, f"Unexpected at 0x4cb288: {data[0x4cb288:0x4cb28c].hex()}"
+    data[0x4cb288 : 0x4cb28c] = bytes.fromhex("80040054")
+
+    # At 0x4cb318 (VA 0xfffffff0074cf318): replace `dsb sy; dsb sy` with poll loop:
+    # ldr w10, [x8, #0x30]; tbz w10, #1, 0xfffffff0074cf318
+    orig_dsbs = bytes.fromhex("9f3f03d59f3f03d5")
+    assert data[0x4cb318 : 0x4cb320] == orig_dsbs, f"Unexpected at 0x4cb318: {data[0x4cb318:0x4cb320].hex()}"
+    data[0x4cb318 : 0x4cb320] = bytes.fromhex("0a3140b9eaff0f36")
+    print("[+] Patched _mtk_ufs_read_hw to poll HCS.UTRLRDY before ringing Doorbell")
+
+    # 25b. Hook error path at 0x4cb3c4 to recovery_hook in code cave at 0x448810:
+    orig_stp = bytes.fromhex("f32300a9")  # stp x19, x8, [sp]
+    assert data[0x4cb3c4 : 0x4cb3c8] == orig_stp, f"Unexpected at 0x4cb3c4: {data[0x4cb3c4:0x4cb3c8].hex()}"
+
+    recovery_hook_asm = r'''
+        // Target VA: 0xfffffff00744c810 (file offset 0x448810)
+        // Invoked from 0xfffffff0074cf3c4 when OCS != 0
+        // Inputs: x19 = lba, w8 = ocs, x22 = utrd_buf, x25 = ufs_mmio_holder, sp has caller frame
+        sub sp, sp, #48
+        stp x29, x30, [sp, #32]
+        stp x20, x21, [sp, #16]
+        stp x23, x24, [sp]
+
+        // Get ufs_mmio
+        ldr x20, [x25, #0x10]       // x20 = ufs_mmio
+
+        // Clear IS errors
+        mvn w10, wzr
+        str w10, [x20, #0x20]
+        dsb sy
+
+        // Read UECPA & UECDL to clear them
+        ldr w3, [x20, #0x38]
+        ldr w4, [x20, #0x3c]
+
+        // Wait for UCRDY (HCS bit 3)
+        mov x10, #0x100000
+    rec_wait_ucrdy:
+        ldr w11, [x20, #0x30]
+        tbnz w11, #3, rec_ucrdy_ok
+        subs x10, x10, #1
+        b.ne rec_wait_ucrdy
+        b rec_fail_timeout
+
+    rec_ucrdy_ok:
+        // Issue DME_LINK_STARTUP (0x16)
+        str wzr, [x20, #0x94]
+        str wzr, [x20, #0x98]
+        str wzr, [x20, #0x9c]
+        dsb sy
+        mov w10, #0x16
+        str w10, [x20, #0x90]
+        dsb sy
+
+        // Wait for UIC command completion (IS bit 10 or bit 8)
+        mov x10, #0x200000
+    rec_wait_uccs:
+        ldr w11, [x20, #0x20]
+        tbnz w11, #10, rec_uccs_ok
+        tbnz w11, #8, rec_uccs_ok
+        subs x10, x10, #1
+        b.ne rec_wait_uccs
+        b rec_fail_timeout
+
+    rec_uccs_ok:
+        // Clear UECPA once due to LINERESET during LINK_STARTUP
+        ldr w11, [x20, #0x38]
+
+        // Clear IS
+        mvn w10, wzr
+        str w10, [x20, #0x20]
+        dsb sy
+
+        // Reset OCS to 0x0f (OCS_INVALID) in utrd_buf
+        mov w10, #0x0f
+        strb w10, [x22, #8]
+        dsb sy
+
+        // Flush cache for utrd_buf
+        mov x0, x22
+        mov w1, #0x20
+    _bl_flush:
+        bl 0                        // FlushPoC_DcacheRegion(0xfffffff00743c324)
+
+        // Wait for HCS.UTRLRDY before ringing Doorbell
+        mov x10, #0x100000
+    rec_wait_utrlrdy:
+        ldr w11, [x20, #0x30]
+        tbnz w11, #1, rec_utrlrdy_ok
+        subs x10, x10, #1
+        b.ne rec_wait_utrlrdy
+
+    rec_utrlrdy_ok:
+        // Re-ring doorbell (slot 0)
+        mov w10, #1
+        str w10, [x20, #0x58]
+        dsb sy
+
+        // Wait for doorbell to clear
+        mov x10, #0x200000
+    rec_wait_dbr:
+        ldr w11, [x20, #0x58]
+        tbz w11, #0, rec_dbr_ok     // doorbell cleared!
+        subs x10, x10, #1
+        b.ne rec_wait_dbr
+        b rec_fail_timeout          // doorbell timeout
+
+    rec_dbr_ok:
+        // Clear completion notification
+        mov w10, #1
+        str w10, [x20, #0x64]
+        dsb sy
+
+        // Clear IS
+        mvn w10, wzr
+        str w10, [x20, #0x20]
+        dsb sy
+
+        // Invalidate cache for utrd_buf & data_buf
+        mov x0, x22
+        mov w1, #0x20
+    _bl_flush2:
+        bl 0                        // FlushPoC_DcacheRegion
+
+        mov x0, #0xa000
+        movk x0, #0x07e9, lsl #16
+        movk x0, #0xfff0, lsl #32
+        movk x0, #0xffff, lsl #48
+        mov w1, #0x1000
+    _bl_flush3:
+        bl 0                        // FlushPoC_DcacheRegion
+
+        // Check new OCS
+        ldrb w8, [x22, #8]
+        cbz w8, rec_success         // OCS == 0: RETRY SUCCEEDED!
+
+    rec_fail_timeout:
+        // Retry failed or timed out: print detailed diagnostics
+        ldr w2, [x20, #0x20]        // IS
+        ldr w3, [x20, #0x38]        // UECPA
+        ldr w4, [x20, #0x3c]        // UECDL
+        ldr w5, [x20, #0x44]        // UECT
+        ldr w6, [x20, #0x30]        // HCS
+
+        sub sp, sp, #64
+        str x19, [sp]               // lba
+        str x8,  [sp, #8]           // ocs
+        str x2,  [sp, #16]          // is
+        str x4,  [sp, #24]          // dl
+        str x3,  [sp, #32]          // pa
+        str x5,  [sp, #40]          // t
+        str x6,  [sp, #48]          // hcs
+
+        adr x0, str_detail_fail
+    _bl_printf:
+        bl 0                        // printf (0xfffffff0072e1bc0)
+
+        add sp, sp, #64
+        ldp x23, x24, [sp]
+        ldp x20, x21, [sp, #16]
+        ldp x29, x30, [sp, #32]
+        add sp, sp, #48
+
+        // Return failure: go to 0xfffffff0074cf424 (returns EIO / 5)
+    _b_fail:
+        b 0
+
+    rec_success:
+        // SUCCESS! Restore stack and jump to 0xfffffff0074cf3d4 (success path)
+        ldp x23, x24, [sp]
+        ldp x20, x21, [sp, #16]
+        ldp x29, x30, [sp, #32]
+        add sp, sp, #48
+    _b_success:
+        b 0
+
+    str_detail_fail:
+        .asciz "ufs_mtk: read fail lba=%llu ocs=%02x is=%08x dl=%08x pa=%08x t=%08x hcs=%08x\n"
+        .align 2
+    '''
+
+    rec_bytes, rec_syms = assemble_with_symbols(recovery_hook_asm)
+    rec_addr = 0x448810
+    flush_addr = 0x438324
+    target_fail = 0x4cb424
+    target_success = 0x4cb3d4
+
+    rec_bytes[rec_syms['_bl_flush'] : rec_syms['_bl_flush'] + 4] = calc_bl(rec_addr + rec_syms['_bl_flush'], flush_addr)
+    rec_bytes[rec_syms['_bl_flush2'] : rec_syms['_bl_flush2'] + 4] = calc_bl(rec_addr + rec_syms['_bl_flush2'], flush_addr)
+    rec_bytes[rec_syms['_bl_flush3'] : rec_syms['_bl_flush3'] + 4] = calc_bl(rec_addr + rec_syms['_bl_flush3'], flush_addr)
+    rec_bytes[rec_syms['_bl_printf'] : rec_syms['_bl_printf'] + 4] = calc_bl(rec_addr + rec_syms['_bl_printf'], printf_addr)
+    rec_bytes[rec_syms['_b_fail'] : rec_syms['_b_fail'] + 4] = calc_b(rec_addr + rec_syms['_b_fail'], target_fail)
+    rec_bytes[rec_syms['_b_success'] : rec_syms['_b_success'] + 4] = calc_b(rec_addr + rec_syms['_b_success'], target_success)
+
+    assert len(rec_bytes) <= 2032
+    data[rec_addr : rec_addr + len(rec_bytes)] = rec_bytes
+    data[0x4cb3c4 : 0x4cb3c8] = calc_b(0x4cb3c4, rec_addr)
+    print(f"[+] Injected UFS error recovery hook at 0x4cb3c4 -> cave at 0x{rec_addr:x} ({len(rec_bytes)} bytes)")
 
     with open(kernel_out, 'wb') as f:
         f.write(data)

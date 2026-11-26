@@ -143,6 +143,15 @@ def patch_darwinboot(fvmain: bytearray) -> bytearray:
     fvmain[off_142c : off_142c + 4] = NOP
     fvmain[off_1438 : off_1438 + 4] = NOP
 
+    # 1b. Patch RAMDisk validation checks that return EFI_COMPROMISED_DATA
+    # At 0x1ca0: replace `cbnz x0, 0x1f40` (001500b5) with NOP
+    # At 0x1cac: replace `cbz x0, 0x1d10` (200300b4) with unconditional `b 0x1d10` (19000014)
+    off_1ca0 = pe_abs_off + 0x400 + (0x1ca0 - 0x1000)
+    off_1cac = pe_abs_off + 0x400 + (0x1cac - 0x1000)
+    print(f"[+] Patching DarwinBoot RAMDisk validation checks at {hex(off_1ca0)}, {hex(off_1cac)}")
+    fvmain[off_1ca0 : off_1ca0 + 4] = NOP
+    fvmain[off_1cac : off_1cac + 4] = bytes.fromhex("19000014")
+
     # 2. Patch handoff stub to safely drop from EL2 to EL1h if entered at EL2
     stub = bytes.fromhex(
         "444238d59f007df2000100541f101cd5"
