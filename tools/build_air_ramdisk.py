@@ -55,7 +55,15 @@ action = "reset"
 """
 
 def build_ramdisk():
-    workspace = '/home/suchit-7x/hackios/out'
+    workspace = os.environ.get('OUT_DIR')
+    if not workspace:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        candidate = os.path.join(script_dir, '../../out')
+        if os.path.isdir(candidate):
+            workspace = os.path.abspath(candidate)
+        else:
+            workspace = '/home/suchit-7x/hackios/out'
+
     kernel_path = os.path.join(workspace, 'mach.development.bcm2837')
     adt_path = os.path.join(workspace, 'KERNEL.adt')
     dtb_path = os.path.join(workspace, 'air.dtb')

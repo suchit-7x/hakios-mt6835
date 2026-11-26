@@ -2,9 +2,28 @@
 import struct, os, hashlib
 
 def build_vendor_boot():
-    src_vb = '/home/suchit-7x/firmware/air/vendor_boot.img'
-    ramdisk_path = '/home/suchit-7x/hackios/out/air_ramdisk.img'
-    out_vb = '/home/suchit-7x/hackios/out/vendor_boot_b.img'
+    out_dir = os.environ.get('OUT_DIR')
+    if not out_dir:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        candidate = os.path.join(script_dir, '../../out')
+        if os.path.isdir(candidate):
+            out_dir = os.path.abspath(candidate)
+        else:
+            out_dir = '/home/suchit-7x/hackios/out'
+
+    src_vb = os.environ.get('VENDOR_BOOT_STOCK')
+    if not src_vb or not os.path.exists(src_vb):
+        for c in [
+            os.path.join(out_dir, 'vendor_boot_stock.img'),
+            os.path.join(out_dir, 'vendor_boot.img'),
+            '/home/suchit-7x/firmware/air/vendor_boot.img',
+        ]:
+            if os.path.exists(c):
+                src_vb = c
+                break
+
+    ramdisk_path = os.path.join(out_dir, 'air_ramdisk.img')
+    out_vb = os.path.join(out_dir, 'vendor_boot_b.img')
 
     assert os.path.exists(src_vb), f"Missing {src_vb}"
     assert os.path.exists(ramdisk_path), f"Missing {ramdisk_path}"

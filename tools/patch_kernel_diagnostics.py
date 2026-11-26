@@ -46,8 +46,17 @@ def calc_adrp(pc, target_page, rd):
     return op.to_bytes(4, 'little')
 
 def main():
-    kernel_orig = '/home/suchit-7x/hackios/out/mach.development.bcm2837.orig'
-    kernel_out = '/home/suchit-7x/hackios/out/mach.development.bcm2837'
+    out_dir = os.environ.get('OUT_DIR')
+    if not out_dir:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        candidate = os.path.join(script_dir, '../../out')
+        if os.path.isdir(candidate):
+            out_dir = os.path.abspath(candidate)
+        else:
+            out_dir = '/home/suchit-7x/hackios/out'
+
+    kernel_orig = os.path.join(out_dir, 'mach.development.bcm2837.orig')
+    kernel_out = os.path.join(out_dir, 'mach.development.bcm2837')
 
     assert os.path.exists(kernel_orig), f"Missing {kernel_orig}"
     with open(kernel_orig, 'rb') as f:
@@ -143,7 +152,7 @@ def main():
     print("[+] Injected WHITE probe at 0x44a430")
 
     # 5. Exit start.s (CYAN bar + ADT injection) at 0x41A4B4D0 (offset 0x4474d0) and branch from 0x41A4E4A8 (offset 0x44a4a8)
-    adt_path = '/home/suchit-7x/hackios/out/KERNEL.adt'
+    adt_path = os.path.join(out_dir, 'KERNEL.adt')
     with open(adt_path, 'rb') as f:
         adt_data = bytearray(f.read())
     assert len(adt_data) == 14048, f"Unexpected ADT length: {len(adt_data)}"

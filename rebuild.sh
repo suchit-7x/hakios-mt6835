@@ -11,6 +11,8 @@ else
 fi
 OUT_DIR="$WORKSPACE_DIR/out"
 TOOLS_DIR="$WORKSPACE_DIR/hackios-mt6835/tools"
+export OUT_DIR
+export WORKSPACE_DIR
 
 echo "=== HakiOS MT6835 (REDMI 13C 5G / air) Build System ==="
 
